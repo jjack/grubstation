@@ -29,6 +29,18 @@ fn validate_mac_address(mac: &str) -> Result<(), validator::ValidationError> {
     }
 }
 
+fn validate_address(address: &str) -> Result<(), validator::ValidationError> {
+    let is_ip = IpAddr::from_str(address).is_ok();
+    // Simple hostname/domain validation: alphanumeric, dots, and dashes, and not empty.
+    let is_hostname = !address.is_empty() && address.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-');
+    
+    if is_ip || is_hostname {
+        Ok(())
+    } else {
+        Err(validator::ValidationError::new("invalid_address"))
+    }
+}
+
 pub fn get_default_config_path() -> PathBuf {
     if cfg!(target_os = "linux") {
         PathBuf::from("/etc/grubstation/config.yaml")
