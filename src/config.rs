@@ -16,11 +16,11 @@ pub struct Config {
     #[validate(nested)]
     pub host: HostConfig,
     #[validate(nested)]
-    pub daemon: DaemonConfig,
+    pub daemon: Option<DaemonConfig>,
     #[validate(nested)]
-    pub wake_on_lan: WakeOnLanConfig,
+    pub wake_on_lan: Option<WakeOnLanConfig>,
     #[validate(nested)]
-    pub grub: GrubConfig,
+    pub grub: Option<GrubConfig>,
 }
 
 #[derive(Debug, Deserialize, Validate)]
@@ -119,20 +119,34 @@ mod tests {
                 mac: "00:11:22:33:44:55".to_string(),
                 address: "127.0.0.1".to_string(),
             },
-            daemon: DaemonConfig { port: 8081 },
-            wake_on_lan: WakeOnLanConfig {
+            daemon: Some(DaemonConfig { port: 8081 }),
+            wake_on_lan: Some(WakeOnLanConfig {
                 broadcast_address: "255.255.255.255".to_string(),
                 port: 9,
-            },
-            grub: GrubConfig {
+            }),
+            grub: Some(GrubConfig {
                 path: PathBuf::from("Cargo.toml"),
-            },
+            }),
         }
     }
 
     #[test]
     fn test_valid_config() {
         let config = create_valid_config();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_minimal_config() {
+        let config = Config {
+            host: HostConfig {
+                mac: "00:11:22:33:44:55".to_string(),
+                address: "127.0.0.1".to_string(),
+            },
+            daemon: None,
+            wake_on_lan: None,
+            grub: None,
+        };
         assert!(config.validate().is_ok());
     }
 
@@ -167,28 +181,28 @@ mod tests {
     #[test]
     fn test_invalid_port() {
         let mut config = create_valid_config();
-        config.daemon.port = 0;
+        config.daemon.as_mut().unwrap().port = 0;
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_invalid_broadcast_address_v6() {
         let mut config = create_valid_config();
-        config.wake_on_lan.broadcast_address = "::1".to_string();
+        config.wake_on_lan.as_mut().unwrap().broadcast_address = "::1".to_string();
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_invalid_broadcast_address_malformed() {
         let mut config = create_valid_config();
-        config.wake_on_lan.broadcast_address = "not-an-ip".to_string();
+        config.wake_on_lan.as_mut().unwrap().broadcast_address = "not-an-ip".to_string();
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_invalid_grub_path() {
         let mut config = create_valid_config();
-        config.grub.path = PathBuf::from("non_existent_file.txt");
+        config.grub.as_mut().unwrap().path = PathBuf::from("non_existent_file.txt");
         assert!(config.validate().is_err());
     }
 }
