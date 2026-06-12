@@ -11,6 +11,8 @@ use mac_address::MacAddress;
 pub struct Config {
     #[validate(nested)]
     pub host: HostConfig,
+    #[validate(nested)]
+    pub daemon: DaemonConfig,
 }
 
 #[derive(Debug, Deserialize, Validate)]
@@ -19,6 +21,12 @@ pub struct HostConfig {
     pub mac: String,
     #[validate(custom(function = "validate_address"))]
     pub address: String,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct DaemonConfig {
+    #[validate(range(min = 1025, max = 65535))]
+    pub port: u16,
 }
 
 fn validate_mac_address(mac: &str) -> Result<(), validator::ValidationError> {
@@ -30,8 +38,7 @@ fn validate_mac_address(mac: &str) -> Result<(), validator::ValidationError> {
 }
 
 fn validate_address(address: &str) -> Result<(), validator::ValidationError> {
-    let ip = IpAddr::from_str(address);
-    let is_ip = ip.is_ok() && !ip.unwrap().is_ipv6();
+    let is_ip = IpAddr::from_str(address).is_ok();
     // Simple hostname/domain validation: alphanumeric, dots, and dashes, and not empty.
     let is_hostname = !address.is_empty() && address.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-');
     
@@ -76,7 +83,20 @@ mod tests {
                 mac: "00:11:22:33:44:55".to_string(),
                 address: "127.0.0.1".to_string(),
             },
+            daemon: DaemonConfig { port: 8081 },
         };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_invalid_port() {
+        let config = DaemonConfig { port: 0 };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_valid_port() {
+        let config = DaemonConfig { port: 65535 };
         assert!(config.validate().is_ok());
     }
 
@@ -108,12 +128,12 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_ip_v6() {
+    fn test_valid_ip_v6() {
         let config = HostConfig {
             mac: "00:11:22:33:44:55".to_string(),
             address: "::1".to_string(),
         };
-        assert!(config.validate().is_err());
+        assert!(config.validate().is_ok());
     }
 
     #[test]
