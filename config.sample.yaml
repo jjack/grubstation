@@ -2,6 +2,9 @@ host:
   address: 10.0.0.0 # ip address or hostname
   mac: 00:00:00:00:00:00 # mac address of the host
 
+grub:
+  path: /boot/grub/grub.cfg # path to grub config file
+
 daemon:
   port: 8081 # port for the daemon to listen
 

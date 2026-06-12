@@ -9,7 +9,7 @@ use mac_address::MacAddress;
 
 const MIN_BROADCAST_PORT: u16 = 1;
 const MIN_PORT: u16 = 1024;
-const MAX_PORT: u16 = 65534;
+const MAX_PORT: u16 = 65535;
 
 #[derive(Debug, Deserialize, Validate)]
 pub struct Config {
@@ -19,6 +19,8 @@ pub struct Config {
     pub daemon: DaemonConfig,
     #[validate(nested)]
     pub wake_on_lan: WakeOnLanConfig,
+    #[validate(nested)]
+    pub grub: GrubConfig,
 }
 
 #[derive(Debug, Deserialize, Validate)]
@@ -43,6 +45,12 @@ pub struct WakeOnLanConfig {
     pub port: u16,
 }
 
+#[derive(Debug, Deserialize, Validate)]
+pub struct GrubConfig {
+    #[validate(custom(function = "validate_file_exists"))]
+    pub path: PathBuf,
+}
+
 fn validate_mac_address(mac: &str) -> Result<(), validator::ValidationError> {
     if MacAddress::from_str(mac).is_ok() {
         Ok(())
@@ -55,7 +63,7 @@ fn validate_address(address: &str) -> Result<(), validator::ValidationError> {
     let is_ipv4 = validate_ipv4(address).is_ok();
     // Simple hostname/domain validation: alphanumeric, dots, and dashes, and not empty.
     let is_hostname = !address.is_empty() && address.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-');
-
+    
     if is_ipv4 || is_hostname {
         Ok(())
     } else {
@@ -67,6 +75,14 @@ fn validate_ipv4(address: &str) -> Result<(), validator::ValidationError> {
     match IpAddr::from_str(address) {
         Ok(IpAddr::V4(_)) => Ok(()),
         _ => Err(validator::ValidationError::new("invalid_ipv4")),
+    }
+}
+
+fn validate_file_exists(path: &PathBuf) -> Result<(), validator::ValidationError> {
+    if path.exists() && path.is_file() {
+        Ok(())
+    } else {
+        Err(validator::ValidationError::new("file_not_found"))
     }
 }
 
@@ -107,6 +123,9 @@ mod tests {
             wake_on_lan: WakeOnLanConfig {
                 broadcast_address: "255.255.255.255".to_string(),
                 port: 9,
+            },
+            grub: GrubConfig {
+                path: PathBuf::from("Cargo.toml"),
             },
         }
     }
@@ -167,9 +186,9 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_broadcast_address_invalid_range() {
+    fn test_invalid_grub_path() {
         let mut config = create_valid_config();
-        config.wake_on_lan.broadcast_address = "192.168.1.256".to_string();
+        config.grub.path = PathBuf::from("non_existent_file.txt");
         assert!(config.validate().is_err());
     }
 }
