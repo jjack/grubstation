@@ -30,7 +30,8 @@ fn validate_mac_address(mac: &str) -> Result<(), validator::ValidationError> {
 }
 
 fn validate_address(address: &str) -> Result<(), validator::ValidationError> {
-    let is_ip = IpAddr::from_str(address).is_ok();
+    let ip = IpAddr::from_str(address);
+    let is_ip = ip.is_ok() && !ip.unwrap().is_ipv6();
     // Simple hostname/domain validation: alphanumeric, dots, and dashes, and not empty.
     let is_hostname = !address.is_empty() && address.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-');
     
@@ -93,6 +94,42 @@ mod tests {
         let config = HostConfig {
             mac: "00:11:22:33:44:55".to_string(),
             address: "not valid!".to_string(),
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_valid_ip_v4() {
+        let config = HostConfig {
+            mac: "00:11:22:33:44:55".to_string(),
+            address: "192.168.1.1".to_string(),
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_invalid_ip_v6() {
+        let config = HostConfig {
+            mac: "00:11:22:33:44:55".to_string(),
+            address: "::1".to_string(),
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_valid_hostname() {
+        let config = HostConfig {
+            mac: "00:11:22:33:44:55".to_string(),
+            address: "grubstation.local".to_string(),
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_empty_address() {
+        let config = HostConfig {
+            mac: "00:11:22:33:44:55".to_string(),
+            address: "".to_string(),
         };
         assert!(config.validate().is_err());
     }
