@@ -76,81 +76,75 @@ pub fn load_config(path: &Path) -> Result<Config, Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_valid_config() {
-        let config = Config {
+    fn create_valid_config() -> Config {
+        Config {
             host: HostConfig {
                 mac: "00:11:22:33:44:55".to_string(),
                 address: "127.0.0.1".to_string(),
             },
             daemon: DaemonConfig { port: 8081 },
-        };
-        assert!(config.validate().is_ok());
+        }
     }
 
     #[test]
-    fn test_invalid_port() {
-        let config = DaemonConfig { port: 0 };
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_valid_port() {
-        let config = DaemonConfig { port: 65535 };
+    fn test_valid_config() {
+        let config = create_valid_config();
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn test_invalid_mac() {
-        let config = HostConfig {
-            mac: "invalid".to_string(),
-            address: "127.0.0.1".to_string(),
-        };
+        let mut config = create_valid_config();
+        config.host.mac = "invalid".to_string();
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_invalid_address() {
-        let config = HostConfig {
-            mac: "00:11:22:33:44:55".to_string(),
-            address: "not valid!".to_string(),
-        };
+        let mut config = create_valid_config();
+        config.host.address = "not valid!".to_string();
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_valid_ip_v4() {
-        let config = HostConfig {
-            mac: "00:11:22:33:44:55".to_string(),
-            address: "192.168.1.1".to_string(),
-        };
+        let mut config = create_valid_config();
+        config.host.address = "192.168.1.1".to_string();
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn test_valid_ip_v6() {
-        let config = HostConfig {
-            mac: "00:11:22:33:44:55".to_string(),
-            address: "::1".to_string(),
-        };
+        let mut config = create_valid_config();
+        config.host.address = "::1".to_string();
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn test_valid_hostname() {
-        let config = HostConfig {
-            mac: "00:11:22:33:44:55".to_string(),
-            address: "grubstation.local".to_string(),
-        };
+        let mut config = create_valid_config();
+        config.host.address = "grubstation.local".to_string();
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn test_empty_address() {
-        let config = HostConfig {
-            mac: "00:11:22:33:44:55".to_string(),
-            address: "".to_string(),
-        };
+        let mut config = create_valid_config();
+        config.host.address = "".to_string();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_port() {
+        let mut config = create_valid_config();
+        config.daemon.port = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_valid_port() {
+        let mut config = create_valid_config();
+        config.daemon.port = 65535;
+        assert!(config.validate().is_ok());
     }
 }
