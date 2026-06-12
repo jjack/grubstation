@@ -7,8 +7,12 @@ use std::str::FromStr;
 use std::net::IpAddr;
 use mac_address::MacAddress;
 
+const DEFAULT_BROADCAST_ADDRESS: &str = "255.255.255.255";
+const DEFAULT_BROADCAST_PORT: u16 = 9;
+const DEFAULT_DAEMON_PORT: u16 = 8081;
+
 const MIN_BROADCAST_PORT: u16 = 1;
-const MIN_PORT: u16 = 1024;
+const MIN_PORT: u16 = 1025;
 const MAX_PORT: u16 = 65535;
 
 #[derive(Debug, Deserialize, Validate)]
@@ -42,7 +46,7 @@ pub struct WakeOnLanConfig {
     #[validate(custom(function = "validate_ipv4"))]
     pub broadcast_address: String,
     #[validate(range(min = MIN_BROADCAST_PORT, max = MAX_PORT))]
-    pub port: u16,
+    pub broadcast_port: u16,
 }
 
 #[derive(Debug, Deserialize, Validate)]
@@ -100,6 +104,9 @@ pub fn get_default_config_path() -> PathBuf {
 
 pub fn load_config(path: &Path) -> Result<Config, Box<dyn std::error::Error>> {
     let s = ConfigLoader::builder()
+        .set_default("daemon.port", DEFAULT_DAEMON_PORT)?
+        .set_default("wake_on_lan.broadcast_address", DEFAULT_BROADCAST_ADDRESS.to_string())?
+        .set_default("wake_on_lan.broadcast_port", DEFAULT_BROADCAST_PORT)?
         .add_source(File::from(path).format(FileFormat::Yaml))
         .build()?;
 
@@ -119,10 +126,10 @@ mod tests {
                 mac: "00:11:22:33:44:55".to_string(),
                 address: "127.0.0.1".to_string(),
             },
-            daemon: Some(DaemonConfig { port: 8081 }),
+            daemon: Some(DaemonConfig { port: DEFAULT_DAEMON_PORT }),
             wake_on_lan: Some(WakeOnLanConfig {
-                broadcast_address: "255.255.255.255".to_string(),
-                port: 9,
+                broadcast_address: DEFAULT_BROADCAST_ADDRESS.to_string(),
+                broadcast_port: DEFAULT_BROADCAST_PORT,
             }),
             grub: Some(GrubConfig {
                 path: PathBuf::from("Cargo.toml"),
