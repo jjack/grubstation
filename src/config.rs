@@ -1,18 +1,32 @@
+use config::{Config as ConfigLoader, File, FileFormat};
 use directories::ProjectDirs;
-use mac_address::MacAddress;
 use serde::Deserialize;
-use std::fs;
 use std::path::{Path, PathBuf};
+use validator::Validate;
 use std::str::FromStr;
+use std::net::IpAddr;
+use mac_address::MacAddress;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Validate)]
 pub struct Config {
+    #[validate(nested)]
     pub host: HostConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Validate)]
 pub struct HostConfig {
+    #[validate(custom(function = "validate_mac_address"))]
     pub mac: String,
+    #[validate(custom(function = "validate_address"))]
+    pub address: String,
+}
+
+fn validate_mac_address(mac: &str) -> Result<(), validator::ValidationError> {
+    if MacAddress::from_str(mac).is_ok() {
+        Ok(())
+    } else {
+        Err(validator::ValidationError::new("invalid_mac"))
+    }
 }
 
 pub fn get_default_config_path() -> PathBuf {
@@ -27,19 +41,15 @@ pub fn get_default_config_path() -> PathBuf {
     }
 }
 
-pub fn validate_config(path: &Path) -> Result<Config, Box<dyn std::error::Error>> {
-    println!("Reading config from: {:?}", path);
-    let content = fs::read_to_string(path)?;
-    let config: Config = serde_yaml::from_str(&content)?;
+pub fn load_config(path: &Path) -> Result<Config, Box<dyn std::error::Error>> {
+    let s = ConfigLoader::builder()
+        .add_source(File::from(path).format(FileFormat::Yaml))
+        .build()?;
 
-    // Validate MAC address
-    match MacAddress::from_str(&config.host.mac) {
-        Ok(_) => {
-            println!("Success: MAC address '{}' is valid.", config.host.mac);
-            Ok(config)
-        }
-        Err(_) => Err(format!("Error: '{}' is not a valid MAC address.", config.host.mac).into()),
-    }
+    let config: Config = s.try_deserialize()?;
+    config.validate()?;
+
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -47,23 +57,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_valid_mac() {
-        let content = "host:\n  mac: '00:11:22:33:44:55'";
-        let config: Config = serde_yaml::from_str(content).unwrap();
-        assert!(MacAddress::from_str(&config.host.mac).is_ok());
+    fn test_valid_config() {
+        let config = Config {
+            host: HostConfig {
+                mac: "00:11:22:33:44:55".to_string(),
+                address: "127.0.0.1".to_string(),
+            },
+        };
+        assert!(config.validate().is_ok());
     }
 
     #[test]
     fn test_invalid_mac() {
-        let content = "host:\n  mac: 'invalid-mac'";
-        let config: Config = serde_yaml::from_str(content).unwrap();
-        assert!(MacAddress::from_str(&config.host.mac).is_err());
+        let config = HostConfig {
+            mac: "invalid".to_string(),
+            address: "127.0.0.1".to_string(),
+        };
+        assert!(config.validate().is_err());
     }
 
     #[test]
-    fn test_empty_mac() {
-        let content = "host:\n  mac: ''";
-        let config: Config = serde_yaml::from_str(content).unwrap();
-        assert!(MacAddress::from_str(&config.host.mac).is_err());
+    fn test_invalid_address() {
+        let config = HostConfig {
+            mac: "00:11:22:33:44:55".to_string(),
+            address: "not valid!".to_string(),
+        };
+        assert!(config.validate().is_err());
     }
 }

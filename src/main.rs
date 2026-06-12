@@ -44,11 +44,13 @@ fn main() {
             println!("Running the wizard to scaffold your initial configuration file...");
         }
         Commands::Validate => {
-            if let Err(e) = config::validate_config(&config_path) {
-                eprintln!("Validation failed: {}", e);
-                std::process::exit(1);
+            match config::load_config(&config_path) {
+                Ok(_) => println!("Configuration is valid."),
+                Err(e) => {
+                    eprintln!("Validation failed: {}", e);
+                    std::process::exit(1);
+                }
             }
-            println!("Configuration is valid.");
         }
         Commands::Run => {
             println!("Starting the long-running process...");
