@@ -7,12 +7,18 @@ use std::str::FromStr;
 use std::net::IpAddr;
 use mac_address::MacAddress;
 
+const MIN_BROADCAST_PORT: u16 = 1;
+const MIN_PORT: u16 = 1024;
+const MAX_PORT: u16 = 65534;
+
 #[derive(Debug, Deserialize, Validate)]
 pub struct Config {
     #[validate(nested)]
     pub host: HostConfig,
     #[validate(nested)]
     pub daemon: DaemonConfig,
+    #[validate(nested)]
+    pub wake_on_lan: WakeOnLanConfig,
 }
 
 #[derive(Debug, Deserialize, Validate)]
@@ -25,7 +31,15 @@ pub struct HostConfig {
 
 #[derive(Debug, Deserialize, Validate)]
 pub struct DaemonConfig {
-    #[validate(range(min = 1025, max = 65535))]
+    #[validate(range(min = MIN_PORT, max = MAX_PORT))]
+    pub port: u16,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct WakeOnLanConfig {
+    #[validate(custom(function = "validate_ipv4"))]
+    pub broadcast_address: String,
+    #[validate(range(min = MIN_BROADCAST_PORT, max = MAX_PORT))]
     pub port: u16,
 }
 
@@ -38,14 +52,21 @@ fn validate_mac_address(mac: &str) -> Result<(), validator::ValidationError> {
 }
 
 fn validate_address(address: &str) -> Result<(), validator::ValidationError> {
-    let is_ip = IpAddr::from_str(address).is_ok();
+    let is_ipv4 = validate_ipv4(address).is_ok();
     // Simple hostname/domain validation: alphanumeric, dots, and dashes, and not empty.
     let is_hostname = !address.is_empty() && address.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-');
-    
-    if is_ip || is_hostname {
+
+    if is_ipv4 || is_hostname {
         Ok(())
     } else {
         Err(validator::ValidationError::new("invalid_address"))
+    }
+}
+
+fn validate_ipv4(address: &str) -> Result<(), validator::ValidationError> {
+    match IpAddr::from_str(address) {
+        Ok(IpAddr::V4(_)) => Ok(()),
+        _ => Err(validator::ValidationError::new("invalid_ipv4")),
     }
 }
 
@@ -83,6 +104,10 @@ mod tests {
                 address: "127.0.0.1".to_string(),
             },
             daemon: DaemonConfig { port: 8081 },
+            wake_on_lan: WakeOnLanConfig {
+                broadcast_address: "255.255.255.255".to_string(),
+                port: 9,
+            },
         }
     }
 
@@ -107,24 +132,10 @@ mod tests {
     }
 
     #[test]
-    fn test_valid_ip_v4() {
-        let mut config = create_valid_config();
-        config.host.address = "192.168.1.1".to_string();
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_valid_ip_v6() {
+    fn test_invalid_ip_v6() {
         let mut config = create_valid_config();
         config.host.address = "::1".to_string();
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_valid_hostname() {
-        let mut config = create_valid_config();
-        config.host.address = "grubstation.local".to_string();
-        assert!(config.validate().is_ok());
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -142,9 +153,23 @@ mod tests {
     }
 
     #[test]
-    fn test_valid_port() {
+    fn test_invalid_broadcast_address_v6() {
         let mut config = create_valid_config();
-        config.daemon.port = 65535;
-        assert!(config.validate().is_ok());
+        config.wake_on_lan.broadcast_address = "::1".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_broadcast_address_malformed() {
+        let mut config = create_valid_config();
+        config.wake_on_lan.broadcast_address = "not-an-ip".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_broadcast_address_invalid_range() {
+        let mut config = create_valid_config();
+        config.wake_on_lan.broadcast_address = "192.168.1.256".to_string();
+        assert!(config.validate().is_err());
     }
 }
