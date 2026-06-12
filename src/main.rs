@@ -1,5 +1,7 @@
 mod config;
+mod wizard;
 
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -31,7 +33,7 @@ enum Commands {
     },
 }
 
-fn main() {
+fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let config_path = cli
@@ -41,17 +43,15 @@ fn main() {
 
     match &cli.command {
         Commands::Init => {
-            println!("Running the wizard to scaffold your initial configuration file...");
+            wizard::wizard_init(&config_path)?;
         }
-        Commands::Validate => {
-            match config::load_config(&config_path) {
-                Ok(_) => println!("Configuration is valid."),
-                Err(e) => {
-                    eprintln!("Validation failed: {}", e);
-                    std::process::exit(1);
-                }
+        Commands::Validate => match config::load_config(&config_path) {
+            Ok(_) => println!("Configuration is valid."),
+            Err(e) => {
+                eprintln!("Validation failed: {}", e);
+                std::process::exit(1);
             }
-        }
+        },
         Commands::Run => {
             println!("Starting the long-running process...");
         }
@@ -63,4 +63,6 @@ fn main() {
             }
         }
     }
+
+    Ok(())
 }
