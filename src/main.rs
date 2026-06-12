@@ -1,4 +1,7 @@
+mod config;
+
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "grubstation")]
@@ -6,6 +9,10 @@ use clap::{Parser, Subcommand};
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+
+    /// Sets a custom config file
+    #[arg(short, long, value_name = "FILE", global = true)]
+    config: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -27,26 +34,30 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
 
+    let config_path = cli
+        .config
+        .clone()
+        .unwrap_or_else(config::get_default_config_path);
+
     match &cli.command {
         Commands::Init => {
             println!("Running the wizard to scaffold your initial configuration file...");
-            // TODO: Implement wizard logic
         }
         Commands::Validate => {
-            println!("Validating configuration...");
-            // TODO: Implement validation logic
+            if let Err(e) = config::validate_config(&config_path) {
+                eprintln!("Validation failed: {}", e);
+                std::process::exit(1);
+            }
+            println!("Configuration is valid.");
         }
         Commands::Run => {
-            println!("Starting daemon...");
-            // TODO: Implement run logic
+            println!("Starting the long-running process...");
         }
         Commands::Sync { dry_run } => {
             if *dry_run {
                 println!("Performing a dry-run sync: dumping formatted output to stdout/stderr...");
-                // TODO: Implement dry-run logic
             } else {
                 println!("Syncing to Home Assistant...");
-                // TODO: Implement sync logic
             }
         }
     }

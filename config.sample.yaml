@@ -1,0 +1,10 @@
+host:
+  address: 10.0.0.0 # ip address or hostname
+  mac: 00:00:00:00:00:00 # mac address of the host
+
+daemon:
+  port: 8081 # port for the daemon to listen
+
+wake_on_lan:
+  broadcast_address: 255.255.255.255 # broadcast address for sending WOL packets
+  broadcast_port: 9 # port for sending WOL packets
