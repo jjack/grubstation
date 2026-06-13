@@ -1,21 +1,23 @@
 use config::{Config as ConfigLoader, File, FileFormat};
 use directories::ProjectDirs;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use validator::Validate;
 use std::str::FromStr;
 use std::net::IpAddr;
 use mac_address::MacAddress;
 
-const DEFAULT_BROADCAST_ADDRESS: &str = "255.255.255.255";
-const DEFAULT_BROADCAST_PORT: u16 = 9;
-const DEFAULT_DAEMON_PORT: u16 = 8081;
+pub const DEFAULT_BROADCAST_ADDRESS: &str = "255.255.255.255";
+pub const DEFAULT_BROADCAST_PORT: u16 = 9;
+pub const DEFAULT_DAEMON_PORT: u16 = 8081;
+
+pub const DEFAULT_GRUB_PATHS: &[&str] = &["/boot/grub/grub.cfg", "/boot/grub2/grub.cfg"];
 
 const MIN_BROADCAST_PORT: u16 = 1;
 const MIN_PORT: u16 = 1025;
 const MAX_PORT: u16 = 65535;
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct Config {
     #[validate(nested)]
     pub host: HostConfig,
@@ -27,7 +29,7 @@ pub struct Config {
     pub grub: Option<GrubConfig>,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct HostConfig {
     #[validate(custom(function = "validate_mac_address"))]
     pub mac: String,
@@ -35,13 +37,13 @@ pub struct HostConfig {
     pub address: String,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct DaemonConfig {
     #[validate(range(min = MIN_PORT, max = MAX_PORT))]
     pub port: u16,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct WakeOnLanConfig {
     #[validate(custom(function = "validate_ipv4"))]
     pub broadcast_address: String,
@@ -49,7 +51,7 @@ pub struct WakeOnLanConfig {
     pub broadcast_port: u16,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct GrubConfig {
     #[validate(custom(function = "validate_file_exists"))]
     pub path: PathBuf,
