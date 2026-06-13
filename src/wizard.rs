@@ -143,10 +143,7 @@ pub fn wizard_init(config_path: &Path) -> Result<()> {
     };
 
     // WoL config
-    let setup_wol = confirm("Do you want to enable Wake-on-LAN?")
-        .initial_value(true)
-        .interact()?;
-    let wake_on_lan = if setup_wol {
+    let wake_on_lan = {
         let broadcast_address: String = input("Enter the broadcast address:")
             .default_input(crate::config::DEFAULT_BROADCAST_ADDRESS)
             .interact()?;
@@ -164,8 +161,6 @@ pub fn wizard_init(config_path: &Path) -> Result<()> {
             broadcast_address,
             broadcast_port,
         })
-    } else {
-        None
     };
 
     let grub = found_grub_path.map(|path| crate::config::GrubConfig {
