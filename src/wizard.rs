@@ -3,7 +3,7 @@ use cliclack::{confirm, input, intro, outro, select};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use std::path::{Path, PathBuf};
 
-pub fn wizard_init(config_path: &Path) -> Result<()> {
+pub fn wizard_init(config_path: &Path) -> Result<bool> {
     intro("Grubstation Configuration Wizard")?;
 
     if config_path.exists() {
@@ -16,7 +16,7 @@ pub fn wizard_init(config_path: &Path) -> Result<()> {
 
         if !should_overwrite {
             outro("Initialization cancelled.")?;
-            return Ok(());
+            return Ok(false);
         }
     }
 
@@ -172,5 +172,10 @@ pub fn wizard_init(config_path: &Path) -> Result<()> {
         "Configuration saved to {:?}. Success!",
         config_path
     ))?;
-    Ok(())
+
+    let start_now = confirm("Do you want to start the daemon now?")
+        .initial_value(true)
+        .interact()?;
+
+    Ok(start_now)
 }

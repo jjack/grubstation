@@ -43,7 +43,9 @@ fn main() -> Result<()> {
 
     match &cli.command {
         Commands::Init => {
-            wizard::wizard_init(&config_path)?;
+            if wizard::wizard_init(&config_path)? {
+                println!("Starting the daemon now (placeholder)...");
+            }
         }
         Commands::Validate => match config::load_config(&config_path) {
             Ok(_) => println!("Configuration is valid."),
