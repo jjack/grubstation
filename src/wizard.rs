@@ -123,10 +123,7 @@ pub fn wizard_init(config_path: &Path) -> Result<()> {
     };
 
     // Daemon config
-    let setup_daemon = confirm("Do you want to run the daemon?")
-        .initial_value(true)
-        .interact()?;
-    let daemon = if setup_daemon {
+    let daemon = {
         let port_str: String = input("Enter the daemon port:")
             .default_input(&crate::config::DEFAULT_DAEMON_PORT.to_string())
             .validate(|input: &String| {
@@ -138,25 +135,15 @@ pub fn wizard_init(config_path: &Path) -> Result<()> {
             .interact()?;
         let port = port_str.parse::<u16>()?;
         Some(crate::config::DaemonConfig { port })
-    } else {
-        None
     };
 
     // WoL config
     let wake_on_lan = {
-        let broadcast_address: String = input("Enter the broadcast address:")
+        let broadcast_address: String = input("Enter the broadcast address (most users should just choose the default):")
             .default_input(crate::config::DEFAULT_BROADCAST_ADDRESS)
             .interact()?;
-        let port_str: String = input("Enter the broadcast port:")
-            .default_input(&crate::config::DEFAULT_BROADCAST_PORT.to_string())
-            .validate(|input: &String| {
-                input
-                    .parse::<u16>()
-                    .map(|_| ())
-                    .map_err(|_| "Invalid port number")
-            })
-            .interact()?;
-        let broadcast_port = port_str.parse::<u16>()?;
+        let broadcast_port: u16 = crate::config::DEFAULT_BROADCAST_PORT;
+
         Some(crate::config::WakeOnLanConfig {
             broadcast_address,
             broadcast_port,
