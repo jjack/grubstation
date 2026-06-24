@@ -14,6 +14,7 @@ pub fn start_advertisement(config: &crate::config::Config) -> Result<(ServiceDae
     let mut properties = HashMap::new();
     properties.insert("mac".to_string(), config.host.mac.clone());
     properties.insert("paired".to_string(), "false".to_string());
+    properties.insert("address".to_string(), config.host.address.clone());
 
     let service_info = ServiceInfo::new(
         service_type,

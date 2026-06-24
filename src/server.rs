@@ -66,6 +66,7 @@ pub fn start_server(
         let mut properties = std::collections::HashMap::new();
         properties.insert("mac".to_string(), host_config.mac.clone());
         properties.insert("paired".to_string(), "true".to_string());
+        properties.insert("address".to_string(), host_config.address.clone());
 
         if let Ok(new_info) = mdns_sd::ServiceInfo::new(
             "_grubstation._tcp.local.",
@@ -258,6 +259,7 @@ fn handle_request(
                 let mut properties = std::collections::HashMap::new();
                 properties.insert("mac".to_string(), host_config.mac.clone());
                 properties.insert("paired".to_string(), "true".to_string());
+                properties.insert("address".to_string(), host_config.address.clone());
 
                 if let Ok(new_info) = mdns_sd::ServiceInfo::new(
                     service_type,
@@ -332,6 +334,7 @@ fn handle_request(
                 let mut properties = std::collections::HashMap::new();
                 properties.insert("mac".to_string(), host_config.mac.clone());
                 properties.insert("paired".to_string(), "false".to_string());
+                properties.insert("address".to_string(), host_config.address.clone());
 
                 if let Ok(new_info) = mdns_sd::ServiceInfo::new(
                     service_type,
