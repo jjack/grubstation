@@ -65,10 +65,14 @@ fn main() -> Result<()> {
             server::start_server(&config, config_path.clone(), mdns, service_info)?;
             println!("Grubstation daemon is running and advertising service via mDNS on port {}...", port);
 
-            // Loop to keep the daemon alive
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(60));
-            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            ctrlc::set_handler(move || {
+                let _ = tx.send(());
+            })?;
+
+            println!("Press Ctrl+C to stop...");
+            let _ = rx.recv();
+            println!("Shutting down daemon...");
         }
         Commands::Sync { dry_run } => {
             run_sync(&config_path, *dry_run)?;
