@@ -2,7 +2,7 @@ use anyhow::Result;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use std::collections::HashMap;
 
-pub fn start_advertisement(config: &crate::config::Config) -> Result<ServiceDaemon> {
+pub fn start_advertisement(config: &crate::config::Config) -> Result<(ServiceDaemon, ServiceInfo)> {
     let port = config.daemon.as_ref().map(|d| d.port).unwrap_or(crate::config::DEFAULT_DAEMON_PORT);
 
     let mdns = ServiceDaemon::new()?;
@@ -24,7 +24,7 @@ pub fn start_advertisement(config: &crate::config::Config) -> Result<ServiceDaem
         Some(properties),
     )?.enable_addr_auto();
 
-    mdns.register(service_info)?;
+    mdns.register(service_info.clone())?;
 
-    Ok(mdns)
+    Ok((mdns, service_info))
 }

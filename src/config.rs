@@ -17,7 +17,7 @@ const MIN_BROADCAST_PORT: u16 = 1;
 const MIN_PORT: u16 = 1025;
 const MAX_PORT: u16 = 65535;
 
-#[derive(Debug, Serialize, Deserialize, Validate)]
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 pub struct Config {
     #[validate(nested)]
     pub host: HostConfig,
@@ -29,7 +29,7 @@ pub struct Config {
     pub grub: Option<GrubConfig>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Validate)]
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 pub struct HostConfig {
     #[validate(custom(function = "validate_mac_address"))]
     pub mac: String,
@@ -37,13 +37,13 @@ pub struct HostConfig {
     pub address: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Validate)]
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 pub struct DaemonConfig {
     #[validate(range(min = MIN_PORT, max = MAX_PORT))]
     pub port: u16,
 }
 
-#[derive(Debug, Serialize, Deserialize, Validate)]
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 pub struct WakeOnLanConfig {
     #[validate(custom(function = "validate_ipv4"))]
     pub broadcast_address: String,
@@ -51,7 +51,7 @@ pub struct WakeOnLanConfig {
     pub broadcast_port: u16,
 }
 
-#[derive(Debug, Serialize, Deserialize, Validate)]
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 pub struct GrubConfig {
     #[validate(custom(function = "validate_file_exists"))]
     pub path: PathBuf,

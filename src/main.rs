@@ -3,6 +3,7 @@ mod grub;
 mod wizard;
 mod service;
 mod mdns;
+mod server;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -60,7 +61,8 @@ fn main() -> Result<()> {
             let config = config::load_config(&config_path).map_err(|e| anyhow::anyhow!("{}", e))?;
             let port = config.daemon.as_ref().map(|d| d.port).unwrap_or(config::DEFAULT_DAEMON_PORT);
 
-            let _mdns = mdns::start_advertisement(&config)?;
+            let (mdns, service_info) = mdns::start_advertisement(&config)?;
+            server::start_server(&config, mdns, service_info)?;
             println!("Grubstation daemon is running and advertising service via mDNS on port {}...", port);
 
             // Loop to keep the daemon alive
