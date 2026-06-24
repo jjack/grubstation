@@ -57,6 +57,14 @@ pub fn parse_grub_entries(path: &Path) -> io::Result<Vec<String>> {
     Ok(entries)
 }
 
+pub fn build_boot_options_payload(mac: &str, entries: &[String]) -> serde_json::Value {
+    json!({
+        "action": "update_boot_options",
+        "mac": mac,
+        "boot_options": entries,
+    })
+}
+
 pub fn push_boot_options(
     ha_daemon_url: &str,
     webhook_id: &str,
@@ -70,11 +78,7 @@ pub fn push_boot_options(
         webhook_id
     );
 
-    let payload = json!({
-        "action": "update_boot_options",
-        "mac": mac,
-        "boot_options": entries,
-    });
+    let payload = build_boot_options_payload(mac, entries);
 
     let mut request = ureq::post(&webhook_url);
     if !api_key.trim().is_empty() {

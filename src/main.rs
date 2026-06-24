@@ -84,11 +84,7 @@ pub fn run_sync(config_path: &std::path::Path, dry_run: bool) -> Result<()> {
     if let Some(ref grub_config) = config.grub {
         let entries = grub::parse_grub_entries(&grub_config.path)?;
 
-        let payload = serde_json::json!({
-            "action": "update_boot_options",
-            "mac": config.host.mac,
-            "boot_options": entries,
-        });
+        let payload = crate::grub::build_boot_options_payload(&config.host.mac, &entries);
 
         if dry_run {
             eprintln!("Performing a dry-run sync: dumping formatted output to stdout...");
