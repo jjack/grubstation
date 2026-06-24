@@ -27,6 +27,14 @@ pub struct Config {
     pub wake_on_lan: Option<WakeOnLanConfig>,
     #[validate(nested)]
     pub grub: Option<GrubConfig>,
+    #[serde(default)]
+    pub webhook_id: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub ha_daemon_url: Option<String>,
+    #[serde(default)]
+    pub ha_grub_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
@@ -147,6 +155,10 @@ mod tests {
                 network_wait: 10,
                 webhook_id: "test-webhook-id".to_string(),
             }),
+            webhook_id: None,
+            api_key: None,
+            ha_daemon_url: None,
+            ha_grub_url: None,
         }
     }
 
@@ -166,6 +178,10 @@ mod tests {
             daemon: None,
             wake_on_lan: None,
             grub: None,
+            webhook_id: None,
+            api_key: None,
+            ha_daemon_url: None,
+            ha_grub_url: None,
         };
         assert!(config.validate().is_ok());
     }

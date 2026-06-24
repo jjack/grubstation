@@ -302,6 +302,10 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
         daemon,
         wake_on_lan,
         grub,
+        webhook_id: None,
+        api_key: None,
+        ha_daemon_url: None,
+        ha_grub_url: None,
     };
 
     // Save config
@@ -317,7 +321,7 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
     ))?;
 
     if let Some(ref grub_config) = config.grub {
-        install_grub_hook(&config, grub_config)?;
+        install_grub_hook(&config, grub_config, None)?;
     }
 
     if mode == InstallMode::ShutdownHookOnly {
@@ -329,20 +333,33 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
     Ok(false)
 }
 
-fn install_grub_hook_to_path(
+pub fn install_grub_hook_to_path(
     config: &crate::config::Config,
     grub_config: &crate::config::GrubConfig,
     hook_path: &Path,
+    ha_grub_url: Option<&str>,
 ) -> Result<()> {
     let wait_list = (1..=grub_config.network_wait)
         .map(|i| i.to_string())
         .collect::<Vec<_>>()
         .join(" ");
 
+    let default_boot_url = format!("(http,{})/api/grubstation/{}?token={}", config.host.address, config.host.mac, grub_config.webhook_id);
+    let boot_url = if let Some(url) = ha_grub_url {
+        let url_without_proto = url.trim_start_matches("http://").trim_start_matches("https://");
+        if let Some(pos) = url_without_proto.find('/') {
+            let host = &url_without_proto[..pos];
+            let path = &url_without_proto[pos..];
+            format!("(http,{}){}", host, path)
+        } else {
+            format!("(http,{})", url_without_proto)
+        }
+    } else {
+        default_boot_url
+    };
+
     let hook_content = include_str!("../templates/99_grubstation")
-        .replace("{{HOST}}", &config.host.address)
-        .replace("{{MAC_ADDRESS}}", &config.host.mac)
-        .replace("{{WEBHOOK_ID}}", &grub_config.webhook_id)
+        .replace("(http,{{HOST}})/api/grubstation/{{MAC_ADDRESS}}?token={{WEBHOOK_ID}}", &boot_url)
         .replace("{{WAIT_TIME_SECONDS}}", &grub_config.network_wait.to_string())
         .replace("{{WAIT_LIST}}", &wait_list);
 
@@ -364,8 +381,8 @@ fn install_grub_hook_to_path(
     Ok(())
 }
 
-fn install_grub_hook(config: &crate::config::Config, grub_config: &crate::config::GrubConfig) -> Result<()> {
-    install_grub_hook_to_path(config, grub_config, Path::new("/etc/grub.d/99_grubstation"))
+pub fn install_grub_hook(config: &crate::config::Config, grub_config: &crate::config::GrubConfig, ha_grub_url: Option<&str>) -> Result<()> {
+    install_grub_hook_to_path(config, grub_config, Path::new("/etc/grub.d/99_grubstation"), ha_grub_url)
 }
 
 #[cfg(test)]
@@ -431,10 +448,14 @@ mod tests {
                 network_wait: 3,
                 webhook_id: "test-webhook-123".to_string(),
             }),
+            webhook_id: None,
+            api_key: None,
+            ha_daemon_url: None,
+            ha_grub_url: None,
         };
         let grub_config = config.grub.as_ref().unwrap();
 
-        assert!(install_grub_hook_to_path(&config, grub_config, &hook_path).is_ok());
+        assert!(install_grub_hook_to_path(&config, grub_config, &hook_path, None).is_ok());
 
         let content = std::fs::read_to_string(&hook_path).unwrap();
         assert!(content.contains("set boot_url=\"(http,192.168.1.100)/api/grubstation/00:11:22:33:44:55?token=test-webhook-123\""));
