@@ -69,10 +69,26 @@ fn main() -> Result<()> {
             }
         }
         Commands::Sync { dry_run } => {
-            if *dry_run {
-                println!("Performing a dry-run sync: dumping formatted output to stdout/stderr...");
+            let config = config::load_config(&config_path).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            if let Some(ref grub_config) = config.grub {
+                let entries = grub::parse_grub_entries(&grub_config.path)?;
+
+                let payload = serde_json::json!({
+                    "mac": config.host.mac,
+                    "boot_options": entries,
+                });
+
+                if *dry_run {
+                    eprintln!("Performing a dry-run sync: dumping formatted output to stdout...");
+                    let formatted = serde_json::to_string_pretty(&payload)?;
+                    println!("{}", formatted);
+                } else {
+                    println!("Syncing to Home Assistant...");
+                    println!("Payload to send: {}", serde_json::to_string(&payload)?);
+                }
             } else {
-                println!("Syncing to Home Assistant...");
+                anyhow::bail!("No GRUB configuration found to sync.");
             }
         }
     }

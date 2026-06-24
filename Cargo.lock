@@ -552,6 +552,7 @@ dependencies = [
  "network-interface",
  "regex",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tempfile",
  "validator",
