@@ -6,7 +6,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart="{{EXE_PATH}}" --config "{{CONFIG_PATH}}" run
+ExecStart="{{EXE_PATH}}" --config "{{CONFIG_PATH}}" sync
 
 [Install]
 WantedBy=shutdown.target reboot.target halt.target
