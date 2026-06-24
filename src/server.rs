@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use log::{error, warn};
 use tiny_http::{Server, Response, Request, Header};
 use serde_json::json;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
@@ -91,7 +92,7 @@ pub fn start_server(
 
             thread::spawn(move || {
                 if let Err(e) = handle_request(request, state, mdns, current_service_info, host_config, config, config_path) {
-                    eprintln!("Error handling request: {}", e);
+                    error!("Error handling request: {}", e);
                 }
             });
         }
@@ -365,7 +366,7 @@ fn handle_request(
                 std::thread::spawn(|| {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                     if let Err(e) = trigger_shutdown() {
-                        eprintln!("Failed to shut down system: {}", e);
+                        error!("Failed to shut down system: {}", e);
                     }
                 });
             }
@@ -392,7 +393,7 @@ fn trigger_shutdown() -> Result<()> {
             .args(&["/s", "/t", "0"])
             .status()
         {
-            eprintln!("Failed to run shutdown /s /t 0: {}. Trying shutdown /s /f /t 0...", e);
+            warn!("Failed to run shutdown /s /t 0: {}. Trying shutdown /s /f /t 0...", e);
             std::process::Command::new("shutdown")
                 .args(&["/s", "/f", "/t", "0"])
                 .status()?;

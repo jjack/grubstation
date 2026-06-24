@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::path::Path;
+use log::info;
 
 pub fn install_and_start_service(config_path: &Path) -> Result<()> {
     let exe_path = std::env::current_exe()?;
@@ -28,7 +29,7 @@ pub fn install_and_start_service(config_path: &Path) -> Result<()> {
             .status()?;
 
         // Start service
-        println!("Starting grubstation service");
+        info!("Starting grubstation service");
         std::process::Command::new("systemctl")
             .arg("start")
             .arg("grubstation.service")
@@ -54,7 +55,7 @@ pub fn install_and_start_service(config_path: &Path) -> Result<()> {
         }
 
         // Run sc start
-        println!("Starting grubstation service");
+        info!("Starting grubstation service");
         let status = std::process::Command::new("sc")
             .args(&["start", "grubstation"])
             .status()?;
@@ -95,7 +96,7 @@ pub fn install_shutdown_hook(config_path: &Path) -> Result<()> {
             .arg("grubstation-shutdown.service")
             .status()?;
 
-        println!("Starting grubstation service");
+        info!("Starting grubstation service");
     } else {
         anyhow::bail!("Shutdown hooks are only supported on Linux via systemd");
     }
