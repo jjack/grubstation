@@ -84,9 +84,10 @@ pub fn install_shutdown_hook(config_path: &Path) -> Result<()> {
         std::fs::write(service_file_path, service_content)?;
 
         // Reload systemd daemon
-        std::process::Command::new("systemctl")
-            .arg("daemon-reload")
-            .status()?;
+        let status = std::process::Command::new("systemctl").arg("daemon-reload").status()?;
+        if !status.success() {
+            anyhow::bail!("systemctl daemon-reload failed");
+        }
 
         // Enable service
         std::process::Command::new("systemctl")
