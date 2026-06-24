@@ -55,6 +55,13 @@ pub struct WakeOnLanConfig {
 pub struct GrubConfig {
     #[validate(custom(function = "validate_file_exists"))]
     pub path: PathBuf,
+    #[serde(default = "default_network_wait")]
+    #[validate(range(min = 0, max = 300))]
+    pub network_wait: u32,
+}
+
+fn default_network_wait() -> u32 {
+    10
 }
 
 fn validate_mac_address(mac: &str) -> Result<(), validator::ValidationError> {
@@ -135,6 +142,7 @@ mod tests {
             }),
             grub: Some(GrubConfig {
                 path: PathBuf::from("Cargo.toml"),
+                network_wait: 10,
             }),
         }
     }
@@ -214,4 +222,12 @@ mod tests {
         config.grub.as_mut().unwrap().path = PathBuf::from("non_existent_file.txt");
         assert!(config.validate().is_err());
     }
+
+    #[test]
+    fn test_invalid_network_wait() {
+        let mut config = create_valid_config();
+        config.grub.as_mut().unwrap().network_wait = 301;
+        assert!(config.validate().is_err());
+    }
 }
+

@@ -223,10 +223,10 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
         })
     };
 
-    let mut network_wait = 10;
+    let mut network_wait = 2;
     if mode == InstallMode::DaemonBoth || mode == InstallMode::ShutdownHookOnly {
         let network_wait_str: String = input("GRUB Network Wait (seconds)")
-            .default_input("10")
+            .default_input("2")
             .validate(|input: &String| {
                 input
                     .parse::<u32>()
