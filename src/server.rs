@@ -361,8 +361,13 @@ fn handle_request(
                     "message": "Shutting down..."
                 }))?;
 
-                // Trigger shutdown
-                trigger_shutdown()?;
+                // Trigger shutdown asynchronously after a short sleep to allow TCP flush
+                std::thread::spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if let Err(e) = trigger_shutdown() {
+                        eprintln!("Failed to shut down system: {}", e);
+                    }
+                });
             }
         }
         _ => {
@@ -383,13 +388,50 @@ fn generate_token() -> String {
 
 fn trigger_shutdown() -> Result<()> {
     if cfg!(target_os = "windows") {
-        std::process::Command::new("shutdown")
+        if let Err(e) = std::process::Command::new("shutdown")
             .args(&["/s", "/t", "0"])
-            .status()?;
+            .status()
+        {
+            eprintln!("Failed to run shutdown /s /t 0: {}. Trying shutdown /s /f /t 0...", e);
+            std::process::Command::new("shutdown")
+                .args(&["/s", "/f", "/t", "0"])
+                .status()?;
+        }
     } else {
-        std::process::Command::new("shutdown")
+        let mut errs = Vec::new();
+        
+        // 1. Try shutdown -h now
+        match std::process::Command::new("shutdown")
             .args(&["-h", "now"])
-            .status()?;
+            .status()
+        {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => errs.push(format!("shutdown -h now exited with status: {}", status)),
+            Err(e) => errs.push(format!("failed to run shutdown: {}", e)),
+        }
+
+        // 2. Try poweroff
+        match std::process::Command::new("poweroff").status() {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => errs.push(format!("poweroff exited with status: {}", status)),
+            Err(e) => errs.push(format!("failed to run poweroff: {}", e)),
+        }
+
+        // 3. Try systemctl poweroff
+        match std::process::Command::new("systemctl").arg("poweroff").status() {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => errs.push(format!("systemctl poweroff exited with status: {}", status)),
+            Err(e) => errs.push(format!("failed to run systemctl: {}", e)),
+        }
+
+        // 4. Try init 0
+        match std::process::Command::new("init").arg("0").status() {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => errs.push(format!("init 0 exited with status: {}", status)),
+            Err(e) => errs.push(format!("failed to run init: {}", e)),
+        }
+
+        anyhow::bail!("All shutdown commands failed: {:?}", errs);
     }
     Ok(())
 }
