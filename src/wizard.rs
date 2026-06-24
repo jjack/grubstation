@@ -10,7 +10,45 @@ enum InstallMode {
     ShutdownHookOnly,
 }
 
+fn check_write_permission(path: &Path) -> Result<()> {
+    if path.exists() {
+        if path.is_dir() {
+            anyhow::bail!("Path is a directory: {:?}", path);
+        }
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)?;
+    } else {
+        let mut ancestor = path.parent().unwrap_or_else(|| Path::new("."));
+        if ancestor.as_os_str().is_empty() {
+            ancestor = Path::new(".");
+        }
+        while !ancestor.exists() {
+            if let Some(parent) = ancestor.parent() {
+                ancestor = parent;
+                if ancestor.as_os_str().is_empty() {
+                    ancestor = Path::new(".");
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        let test_file = ancestor.join(".grubstation_write_test");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&test_file)?;
+        std::fs::remove_file(&test_file)?;
+    }
+    Ok(())
+}
+
 pub fn wizard_init(config_path: &Path) -> Result<bool> {
+    check_write_permission(config_path).map_err(|e| {
+        anyhow::anyhow!("Permission check failed: Cannot write to config file at {:?}. Error: {}", config_path, e)
+    })?;
+
     intro("Grubstation Configuration Wizard")?;
 
     if config_path.exists() {
@@ -276,3 +314,52 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
 
     Ok(start_now)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use std::fs::File;
+
+    #[test]
+    fn test_check_write_permission_existing_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("config.yaml");
+        File::create(&file_path).unwrap();
+        assert!(check_write_permission(&file_path).is_ok());
+    }
+
+    #[test]
+    fn test_check_write_permission_non_existing_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("config.yaml");
+        assert!(check_write_permission(&file_path).is_ok());
+    }
+
+    #[test]
+    fn test_check_write_permission_nested_non_existing_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("nested/dir/config.yaml");
+        assert!(check_write_permission(&file_path).is_ok());
+    }
+
+    #[test]
+    fn test_check_write_permission_is_directory() {
+        let dir = tempdir().unwrap();
+        assert!(check_write_permission(dir.path()).is_err());
+    }
+
+    #[test]
+    fn test_check_write_permission_read_only() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("config.yaml");
+        {
+            let file = File::create(&file_path).unwrap();
+            let mut perms = file.metadata().unwrap().permissions();
+            perms.set_readonly(true);
+            file.set_permissions(perms).unwrap();
+        }
+        assert!(check_write_permission(&file_path).is_err());
+    }
+}
+
