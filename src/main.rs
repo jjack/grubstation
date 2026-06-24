@@ -85,6 +85,7 @@ pub fn run_sync(config_path: &std::path::Path, dry_run: bool) -> Result<()> {
         let entries = grub::parse_grub_entries(&grub_config.path)?;
 
         let payload = serde_json::json!({
+            "action": "update_boot_options",
             "mac": config.host.mac,
             "boot_options": entries,
         });
@@ -206,6 +207,7 @@ mod tests {
                 let mut body = String::new();
                 req.as_reader().read_to_string(&mut body).unwrap();
                 let json_body: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(json_body["action"], "update_boot_options");
                 assert_eq!(json_body["mac"], "00:11:22:33:44:55");
                 assert_eq!(json_body["boot_options"].as_array().unwrap()[0].as_str().unwrap(), "Ubuntu");
 

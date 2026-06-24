@@ -502,6 +502,7 @@ mod tests {
                 let mut body = String::new();
                 req.as_reader().read_to_string(&mut body).unwrap();
                 let json_body: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(json_body["action"], "update_boot_options");
                 assert_eq!(json_body["mac"], "00:11:22:33:44:55");
                 let options = json_body["boot_options"].as_array().unwrap();
                 assert_eq!(options.len(), 2);

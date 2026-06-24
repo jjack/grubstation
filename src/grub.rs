@@ -71,6 +71,7 @@ pub fn push_boot_options(
     );
 
     let payload = json!({
+        "action": "update_boot_options",
         "mac": mac,
         "boot_options": entries,
     });
