@@ -1,4 +1,5 @@
 mod config;
+mod grub;
 mod wizard;
 
 use anyhow::Result;

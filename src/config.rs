@@ -84,7 +84,7 @@ fn validate_ipv4(address: &str) -> Result<(), validator::ValidationError> {
     }
 }
 
-fn validate_file_exists(path: &PathBuf) -> Result<(), validator::ValidationError> {
+fn validate_file_exists(path: &Path) -> Result<(), validator::ValidationError> {
     if path.exists() && path.is_file() {
         Ok(())
     } else {
