@@ -1,0 +1,12 @@
+[Unit]
+Description=Grubstation Shutdown Hook
+DefaultDependencies=no
+Before=shutdown.target reboot.target halt.target
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart="{{EXE_PATH}}" --config "{{CONFIG_PATH}}" run
+
+[Install]
+WantedBy=shutdown.target reboot.target halt.target

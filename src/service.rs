@@ -67,3 +67,37 @@ pub fn install_and_start_service(config_path: &Path) -> Result<()> {
 
     Ok(())
 }
+
+pub fn install_shutdown_hook(config_path: &Path) -> Result<()> {
+    let exe_path = std::env::current_exe()?;
+    let abs_config_path = config_path.canonicalize()?;
+
+    if cfg!(target_os = "linux") {
+        let service_content = include_str!("../templates/grubstation-shutdown.service")
+            .replace("{{EXE_PATH}}", &exe_path.to_string_lossy())
+            .replace("{{CONFIG_PATH}}", &abs_config_path.to_string_lossy());
+
+        let service_file_path = Path::new("/etc/systemd/system/grubstation-shutdown.service");
+        if let Some(parent) = service_file_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(service_file_path, service_content)?;
+
+        // Reload systemd daemon
+        std::process::Command::new("systemctl")
+            .arg("daemon-reload")
+            .status()?;
+
+        // Enable service
+        std::process::Command::new("systemctl")
+            .arg("enable")
+            .arg("grubstation-shutdown.service")
+            .status()?;
+
+        println!("Starting grubstation service");
+    } else {
+        anyhow::bail!("Shutdown hooks are only supported on Linux via systemd");
+    }
+
+    Ok(())
+}

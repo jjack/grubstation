@@ -320,7 +320,9 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
         install_grub_hook(&config, grub_config)?;
     }
 
-    if config.daemon.is_some() {
+    if mode == InstallMode::ShutdownHookOnly {
+        crate::service::install_shutdown_hook(config_path)?;
+    } else if config.daemon.is_some() {
         crate::service::install_and_start_service(config_path)?;
     }
 
