@@ -197,7 +197,7 @@ fn handle_request(
                 };
 
                 // Push initial boot options to Home Assistant
-                if let Err(err) = crate::grub::push_boot_options(
+                if let Err(err) = crate::client::push_boot_options(
                     &pair_req.ha_daemon_url,
                     &pair_req.webhook_id,
                     &pair_req.api_key,

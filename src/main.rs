@@ -4,6 +4,7 @@ mod wizard;
 mod service;
 mod mdns;
 mod server;
+mod client;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -89,7 +90,7 @@ pub fn run_sync(config_path: &std::path::Path, dry_run: bool) -> Result<()> {
     if let Some(ref grub_config) = config.grub {
         let entries = grub::parse_grub_entries(&grub_config.path)?;
 
-        let payload = crate::grub::build_boot_options_payload(&config.host.mac, &entries);
+        let payload = crate::client::build_boot_options_payload(&config.host.mac, &entries);
 
         if dry_run {
             eprintln!("Performing a dry-run sync: dumping formatted output to stdout...");
@@ -116,7 +117,7 @@ pub fn run_sync(config_path: &std::path::Path, dry_run: bool) -> Result<()> {
 
             println!("Syncing to Home Assistant...");
             println!("Payload to send: {}", serde_json::to_string(&payload)?);
-            crate::grub::push_boot_options(
+            crate::client::push_boot_options(
                 ha_daemon_url,
                 webhook_id,
                 api_key,
