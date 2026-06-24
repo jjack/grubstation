@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use log::{error, warn};
+use log::{error, warn, info};
 use tiny_http::{Server, Response, Request, Header};
 use serde_json::json;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
@@ -27,6 +27,7 @@ pub fn start_server(
     config_path: PathBuf,
     mdns: ServiceDaemon,
     service_info: ServiceInfo,
+    is_temp: bool,
 ) -> Result<()> {
     let port = config.daemon.as_ref().map(|d| d.port).unwrap_or(crate::config::DEFAULT_DAEMON_PORT);
     let server = Server::http(format!("0.0.0.0:{}", port))
@@ -91,7 +92,7 @@ pub fn start_server(
             let config_path = config_path.clone();
 
             thread::spawn(move || {
-                if let Err(e) = handle_request(request, state, mdns, current_service_info, host_config, config, config_path) {
+                if let Err(e) = handle_request(request, state, mdns, current_service_info, host_config, config, config_path, is_temp) {
                     error!("Error handling request: {}", e);
                 }
             });
@@ -109,6 +110,7 @@ fn handle_request(
     host_config: crate::config::HostConfig,
     config: crate::config::Config,
     config_path: PathBuf,
+    is_temp: bool,
 ) -> Result<()> {
     let method = request.method().as_str();
     let url = request.url();
@@ -289,6 +291,14 @@ fn handle_request(
                     "success": true,
                     "token": token
                 }))?;
+
+                if is_temp {
+                    info!("Pairing completed in temporary server. Shutting down pairing server in 1 second...");
+                    std::thread::spawn(|| {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        std::process::exit(0);
+                    });
+                }
             }
         }
         ("POST", "/unpair") => {
@@ -527,7 +537,7 @@ mod tests {
             None,
         )?.enable_addr_auto();
         
-        start_server(&config, config_path.clone(), mdns, service_info)?;
+        start_server(&config, config_path.clone(), mdns, service_info, false)?;
         
         // Wait a tiny bit for server to spin up
         std::thread::sleep(std::time::Duration::from_millis(100));
