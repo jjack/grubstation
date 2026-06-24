@@ -2,6 +2,7 @@ mod config;
 mod grub;
 mod wizard;
 mod service;
+mod mdns;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -56,6 +57,16 @@ fn main() -> Result<()> {
         },
         Commands::Run => {
             println!("Starting the long-running process...");
+            let config = config::load_config(&config_path).map_err(|e| anyhow::anyhow!("{}", e))?;
+            let port = config.daemon.as_ref().map(|d| d.port).unwrap_or(config::DEFAULT_DAEMON_PORT);
+
+            let _mdns = mdns::start_advertisement(&config)?;
+            println!("Grubstation daemon is running and advertising service via mDNS on port {}...", port);
+
+            // Loop to keep the daemon alive
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
         }
         Commands::Sync { dry_run } => {
             if *dry_run {
