@@ -80,7 +80,8 @@ pub fn push_boot_options(
 
     let payload = build_boot_options_payload(mac, entries);
 
-    let mut request = ureq::post(&webhook_url);
+    let mut request = ureq::post(&webhook_url)
+        .timeout(std::time::Duration::from_secs(10));
     if !api_key.trim().is_empty() {
         request = request.set("Authorization", &format!("Bearer {}", api_key));
     }
