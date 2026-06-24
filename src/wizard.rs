@@ -262,18 +262,7 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
     };
 
     let mut network_wait = 2;
-    let mut webhook_id = String::new();
     if mode == InstallMode::DaemonBoth || mode == InstallMode::ShutdownHookOnly {
-        webhook_id = input("Home Assistant Webhook ID")
-            .validate(|input: &String| {
-                if input.trim().is_empty() {
-                    Err("Webhook ID cannot be empty")
-                } else {
-                    Ok(())
-                }
-            })
-            .interact()?;
-
         let network_wait_str: String = input("GRUB Network Wait (seconds)")
             .default_input("2")
             .validate(|input: &String| {
@@ -291,7 +280,7 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
             grub_config_path.map(|path| crate::config::GrubConfig {
                 path: PathBuf::from(path),
                 network_wait,
-                webhook_id,
+                webhook_id: String::new(),
             })
         }
         InstallMode::DaemonShutdownOnly => None,
@@ -321,7 +310,9 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
     ))?;
 
     if let Some(ref grub_config) = config.grub {
-        install_grub_hook(&config, grub_config, None)?;
+        if !grub_config.webhook_id.is_empty() {
+            install_grub_hook(&config, grub_config, None)?;
+        }
     }
 
     if mode == InstallMode::ShutdownHookOnly {
