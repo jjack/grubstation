@@ -1,6 +1,7 @@
 mod config;
 mod grub;
 mod wizard;
+mod service;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -44,9 +45,7 @@ fn main() -> Result<()> {
 
     match &cli.command {
         Commands::Init => {
-            if wizard::wizard_init(&config_path)? {
-                println!("Starting the daemon now (placeholder)...");
-            }
+            wizard::wizard_init(&config_path)?;
         }
         Commands::Validate => match config::load_config(&config_path) {
             Ok(_) => println!("Configuration is valid."),

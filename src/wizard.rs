@@ -262,7 +262,18 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
     };
 
     let mut network_wait = 2;
+    let mut webhook_id = String::new();
     if mode == InstallMode::DaemonBoth || mode == InstallMode::ShutdownHookOnly {
+        webhook_id = input("Home Assistant Webhook ID")
+            .validate(|input: &String| {
+                if input.trim().is_empty() {
+                    Err("Webhook ID cannot be empty")
+                } else {
+                    Ok(())
+                }
+            })
+            .interact()?;
+
         let network_wait_str: String = input("GRUB Network Wait (seconds)")
             .default_input("2")
             .validate(|input: &String| {
@@ -280,6 +291,7 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
             grub_config_path.map(|path| crate::config::GrubConfig {
                 path: PathBuf::from(path),
                 network_wait,
+                webhook_id,
             })
         }
         InstallMode::DaemonShutdownOnly => None,
@@ -304,15 +316,54 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
         config_path
     ))?;
 
-    let start_now = if config.daemon.is_some() {
-        confirm("Do you want to start the daemon now?")
-            .initial_value(true)
-            .interact()?
-    } else {
-        false
-    };
+    if let Some(ref grub_config) = config.grub {
+        install_grub_hook(&config, grub_config)?;
+    }
 
-    Ok(start_now)
+    if config.daemon.is_some() {
+        crate::service::install_and_start_service(config_path)?;
+    }
+
+    Ok(false)
+}
+
+fn install_grub_hook_to_path(
+    config: &crate::config::Config,
+    grub_config: &crate::config::GrubConfig,
+    hook_path: &Path,
+) -> Result<()> {
+    let wait_list = (1..=grub_config.network_wait)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let hook_content = include_str!("../templates/99_grubstation")
+        .replace("{{HOST}}", &config.host.address)
+        .replace("{{MAC_ADDRESS}}", &config.host.mac)
+        .replace("{{WEBHOOK_ID}}", &grub_config.webhook_id)
+        .replace("{{WAIT_TIME_SECONDS}}", &grub_config.network_wait.to_string())
+        .replace("{{WAIT_LIST}}", &wait_list);
+
+    if let Some(parent) = hook_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(hook_path, hook_content)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(hook_path)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(hook_path, perms)?;
+    }
+
+    println!("note: the exact GRUB networking configuration applied by this tool may not work perfectly for every motherboard due to how finicky UEFI and network firmware can be across different hardware vendors. If your system struggles to connect to the network from within GRUB, you may need to manually troubleshoot your GRUB network settings.");
+
+    Ok(())
+}
+
+fn install_grub_hook(config: &crate::config::Config, grub_config: &crate::config::GrubConfig) -> Result<()> {
+    install_grub_hook_to_path(config, grub_config, Path::new("/etc/grub.d/99_grubstation"))
 }
 
 #[cfg(test)]
@@ -360,6 +411,32 @@ mod tests {
             file.set_permissions(perms).unwrap();
         }
         assert!(check_write_permission(&file_path).is_err());
+    }
+
+    #[test]
+    fn test_install_grub_hook_to_path() {
+        let dir = tempdir().unwrap();
+        let hook_path = dir.path().join("99_grubstation");
+        let config = crate::config::Config {
+            host: crate::config::HostConfig {
+                mac: "00:11:22:33:44:55".to_string(),
+                address: "192.168.1.100".to_string(),
+            },
+            daemon: None,
+            wake_on_lan: None,
+            grub: Some(crate::config::GrubConfig {
+                path: PathBuf::from("Cargo.toml"),
+                network_wait: 3,
+                webhook_id: "test-webhook-123".to_string(),
+            }),
+        };
+        let grub_config = config.grub.as_ref().unwrap();
+
+        assert!(install_grub_hook_to_path(&config, grub_config, &hook_path).is_ok());
+
+        let content = std::fs::read_to_string(&hook_path).unwrap();
+        assert!(content.contains("set boot_url=\"(http,192.168.1.100)/api/grubstation/00:11:22:33:44:55?token=test-webhook-123\""));
+        assert!(content.contains("for i in 1 2 3; do"));
     }
 }
 

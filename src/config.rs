@@ -58,6 +58,8 @@ pub struct GrubConfig {
     #[serde(default = "default_network_wait")]
     #[validate(range(min = 0, max = 300))]
     pub network_wait: u32,
+    #[serde(default)]
+    pub webhook_id: String,
 }
 
 fn default_network_wait() -> u32 {
@@ -143,6 +145,7 @@ mod tests {
             grub: Some(GrubConfig {
                 path: PathBuf::from("Cargo.toml"),
                 network_wait: 10,
+                webhook_id: "test-webhook-id".to_string(),
             }),
         }
     }

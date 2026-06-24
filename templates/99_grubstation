@@ -1,0 +1,42 @@
+#!/bin/bash
+
+set -e
+
+cat <<'EOF'
+insmod net
+insmod efinet
+insmod http
+
+set fetch_success="0"
+
+# Safely store the URL as a string to prevent wildcard/query parser crashes.
+set boot_url="(http,{{HOST}})/api/grubstation/{{MAC_ADDRESS}}?token={{WEBHOOK_ID}}"
+
+# Wait up to {{WAIT_TIME_SECONDS}} seconds for Spanning Tree Protocol to clear
+# GRUB can't math, so we iterate over a literal list of {{WAIT_TIME_SECONDS}} items
+for i in {{WAIT_LIST}}; do
+    if net_bootp; then
+        # Try to fetch the Home Assistant webhook using the safe variable
+        if source $boot_url; then
+            set fetch_success="1"
+            echo "Success! Payload received."
+            break
+        fi
+    fi
+    
+    # If either DHCP or the HTTP fetch fails, wait 1 second and try again
+    sleep 1
+done
+
+# Check if we broke out of the loop successfully or exhausted all 35 attempts
+if [ "$fetch_success" = "0" ]; then
+    echo "CRITICAL: Switch port never opened or HA is down."
+    echo "Falling back to default OS in 3 seconds..."
+    sleep 3
+fi
+
+# Apply the override if the payload provided one
+if [ -n "$next_entry" ]; then
+    set default="$next_entry"
+fi
+EOF

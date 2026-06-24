@@ -1,0 +1,11 @@
+[Unit]
+Description=Grubstation Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart="{{EXE_PATH}}" --config "{{CONFIG_PATH}}" run
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
