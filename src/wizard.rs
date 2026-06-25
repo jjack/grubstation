@@ -354,6 +354,7 @@ pub fn install_grub_hook_to_path(
         .replace("{{WAIT_TIME_SECONDS}}", &grub_config.network_wait.to_string())
         .replace("{{WAIT_LIST}}", &wait_list);
 
+    log::info!("Updating GRUB config hook at {:?}", hook_path);
     if let Some(parent) = hook_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -367,13 +368,63 @@ pub fn install_grub_hook_to_path(
         std::fs::set_permissions(hook_path, perms)?;
     }
 
+    log::info!("Successfully updated GRUB config hook.");
     println!("note: the exact GRUB networking configuration applied by this tool may not work perfectly for every motherboard due to how finicky UEFI and network firmware can be across different hardware vendors. If your system struggles to connect to the network from within GRUB, you may need to manually troubleshoot your GRUB network settings.");
 
     Ok(())
 }
 
 pub fn install_grub_hook(config: &crate::config::Config, grub_config: &crate::config::GrubConfig, ha_grub_url: Option<&str>) -> Result<()> {
-    install_grub_hook_to_path(config, grub_config, Path::new("/etc/grub.d/99_grubstation"), ha_grub_url)
+    install_grub_hook_to_path(config, grub_config, Path::new("/etc/grub.d/99_grubstation"), ha_grub_url)?;
+
+    #[cfg(target_os = "linux")]
+    {
+        log::info!("Running update-grub to apply GRUB configuration changes...");
+        
+        let run_cmd = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::ExitStatus> {
+            std::process::Command::new(cmd).args(args).status()
+        };
+
+        // Try update-grub first
+        let result = run_cmd("update-grub", &[]);
+        
+        let status = match result {
+            Ok(status) => Some(status),
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Try grub-mkconfig
+                let mkconfig_path = grub_config.path.to_string_lossy();
+                match run_cmd("grub-mkconfig", &["-o", &mkconfig_path]) {
+                    Ok(status) => Some(status),
+                    Err(ref e2) if e2.kind() == std::io::ErrorKind::NotFound => {
+                        // Try grub2-mkconfig
+                        match run_cmd("grub2-mkconfig", &["-o", &mkconfig_path]) {
+                            Ok(status) => Some(status),
+                            Err(ref e3) if e3.kind() == std::io::ErrorKind::NotFound => {
+                                None
+                            }
+                            Err(e3) => return Err(anyhow::anyhow!("Failed to run grub2-mkconfig: {}", e3)),
+                        }
+                    }
+                    Err(e2) => return Err(anyhow::anyhow!("Failed to run grub-mkconfig: {}", e2)),
+                }
+            }
+            Err(e) => return Err(anyhow::anyhow!("Failed to run update-grub: {}", e)),
+        };
+
+        match status {
+            Some(status) if status.success() => {
+                log::info!("Successfully ran update-grub / grub-mkconfig.");
+            }
+            Some(status) => {
+                log::warn!("update-grub / grub-mkconfig failed with exit status: {}. Please run it manually.", status);
+            }
+            None => {
+                log::warn!("Neither update-grub nor grub-mkconfig/grub2-mkconfig was found in PATH. Skipping GRUB configuration update.");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

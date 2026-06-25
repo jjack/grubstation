@@ -4,6 +4,7 @@ use std::path::Path;
 use regex::Regex;
 
 pub fn parse_grub_entries(path: &Path) -> io::Result<Vec<String>> {
+    log::info!("Parsing GRUB entries from {:?}", path);
     let file = File::open(path)?;
     let reader = io::BufReader::new(file);
     let mut entries = Vec::new();
@@ -43,7 +44,7 @@ pub fn parse_grub_entries(path: &Path) -> io::Result<Vec<String>> {
                 } else if c == '}' {
                     brace_depth -= 1;
                     if let Some(&depth) = submenu_depths.last() {
-                        if brace_depth == depth {
+                        if brace_depth <= depth {
                             submenu_stack.pop();
                             submenu_depths.pop();
                         }
@@ -53,6 +54,7 @@ pub fn parse_grub_entries(path: &Path) -> io::Result<Vec<String>> {
         }
     }
 
+    log::info!("Successfully parsed {} GRUB entries.", entries.len());
     Ok(entries)
 }
 

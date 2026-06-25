@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use log::{error, warn, info};
+use log::{error, warn, info, debug};
 use tiny_http::{Server, Response, Request, Header};
 use serde_json::json;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
@@ -168,9 +168,12 @@ fn handle_request(
                     return Ok(());
                 }
 
+                debug!("Received /pair payload: {}", content);
+
                 let pair_req: PairRequest = match serde_json::from_str(&content) {
                     Ok(req) => req,
                     Err(e) => {
+                        error!("Invalid JSON payload: {}", e);
                         send_json(request, 400, json!({
                             "error": format!("Invalid JSON payload: {}", e)
                         }))?;
@@ -192,6 +195,7 @@ fn handle_request(
                 })() {
                     Ok(e) => e,
                     Err(err) => {
+                        error!("Failed to parse GRUB entries: {}", err);
                         send_json(request, 500, json!({
                             "error": format!("Failed to parse GRUB entries: {}", err)
                         }))?;
@@ -199,19 +203,6 @@ fn handle_request(
                     }
                 };
 
-                // Push initial boot options to Home Assistant
-                if let Err(err) = crate::client::push_boot_options(
-                    &pair_req.ha_daemon_url,
-                    &pair_req.webhook_id,
-                    &pair_req.api_key,
-                    &host_config.mac,
-                    &entries,
-                ) {
-                    send_json(request, 500, json!({
-                        "error": format!("Failed to push initial boot options: {}", err)
-                    }))?;
-                    return Ok(());
-                }
 
                 // If apply_config is true, install/apply the GRUB boot hook
                 if pair_req.apply_config {
@@ -232,6 +223,7 @@ fn handle_request(
                     grub_config.webhook_id = pair_req.webhook_id.clone();
 
                     if let Err(err) = crate::wizard::install_grub_hook(&config, &grub_config, Some(&pair_req.ha_grub_url)) {
+                        error!("Failed to apply GRUB configuration: {}", err);
                         send_json(request, 500, json!({
                             "error": format!("Failed to apply GRUB configuration: {}", err)
                         }))?;
@@ -286,6 +278,7 @@ fn handle_request(
                 });
 
                 if let Ok(json_str) = serde_json::to_string_pretty(&state_file_data) {
+                    info!("Saving pairing state to {:?}", state_path);
                     let _ = std::fs::write(&state_path, json_str);
                 }
 
@@ -294,10 +287,37 @@ fn handle_request(
                     "token": token
                 }))?;
 
+                info!("Pairing request handled successfully.");
+
+                // Spawn background thread to perform initial sync of boot options after responding
+                let ha_daemon_url = pair_req.ha_daemon_url.clone();
+                let webhook_id = pair_req.webhook_id.clone();
+                let api_key = pair_req.api_key.clone();
+                let mac = host_config.mac.clone();
+                std::thread::spawn(move || {
+                    // Sleep 500ms to let Home Assistant register the webhook endpoint
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    info!("Performing initial sync of boot options to Home Assistant...");
+                    match crate::client::push_boot_options(
+                        &ha_daemon_url,
+                        &webhook_id,
+                        &api_key,
+                        &mac,
+                        &entries,
+                    ) {
+                        Ok(()) => {
+                            info!("Initial boot options sync successful!");
+                        }
+                        Err(err) => {
+                            error!("Initial boot options sync failed: {}", err);
+                        }
+                    }
+                });
+
                 if is_temp {
-                    info!("Pairing completed in temporary server. Shutting down pairing server in 1 second...");
+                    info!("Pairing completed in temporary server. Shutting down pairing server in 3 seconds to allow initial sync to complete...");
                     std::thread::spawn(|| {
-                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        std::thread::sleep(std::time::Duration::from_secs(3));
                         std::process::exit(0);
                     });
                 }
@@ -305,6 +325,9 @@ fn handle_request(
         }
         ("POST", "/unpair") => {
             let provided_token = get_bearer_token(&request);
+            let mut content = String::new();
+            let _ = request.as_reader().read_to_string(&mut content);
+            info!("Received /unpair request. Token: {:?}, Payload: {}", provided_token, content);
             let mut s = state.lock().unwrap();
             
             if !s.paired {
@@ -360,6 +383,9 @@ fn handle_request(
         }
         ("POST", "/shutdown") => {
             let provided_token = get_bearer_token(&request);
+            let mut content = String::new();
+            let _ = request.as_reader().read_to_string(&mut content);
+            info!("Received /shutdown request. Token: {:?}, Payload: {}", provided_token, content);
             let is_authorized = {
                 let s = state.lock().unwrap();
                 s.paired && provided_token.is_some() && s.token.as_ref() == provided_token.as_ref()

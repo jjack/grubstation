@@ -150,6 +150,7 @@ fn main() -> Result<()> {
                 });
 
                 let json_str = serde_json::to_string_pretty(&state_file_data)?;
+                log::info!("Saving manual pairing state to {:?}", state_path);
                 std::fs::write(&state_path, json_str)?;
 
                 println!("Manual pairing successful! Token saved to state.json");
