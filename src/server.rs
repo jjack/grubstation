@@ -37,12 +37,18 @@ pub fn start_server(
     
     let mut initial_paired = false;
     let mut initial_token = None;
+    let mut webhook_id = None;
+    let mut api_key = None;
+    let mut ha_daemon_url = None;
 
     if state_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&state_path) {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
                 initial_paired = val["paired"].as_bool().unwrap_or(false);
                 initial_token = val["token"].as_str().map(|s| s.to_string());
+                webhook_id = val["webhook_id"].as_str().map(|s| s.to_string());
+                api_key = val["api_key"].as_str().map(|s| s.to_string());
+                ha_daemon_url = val["ha_daemon_url"].as_str().map(|s| s.to_string());
             }
         }
     }
@@ -57,7 +63,7 @@ pub fn start_server(
     let current_service_info = Arc::new(Mutex::new(service_info));
     let config = config.clone();
 
-    // If loaded state is already paired, update the mDNS advertisement
+    // If loaded state is already paired, update the mDNS advertisement and trigger startup sync
     if initial_paired {
         let mut info = current_service_info.lock().unwrap();
         let fullname = info.get_fullname().to_string();
@@ -80,6 +86,92 @@ pub fn start_server(
             if let Ok(()) = mdns.register(new_info.clone()) {
                 *info = new_info;
             }
+        }
+
+        // Trigger startup sync of boot options to Home Assistant
+        if let (Some(webhook_id), Some(ha_daemon_url)) = (webhook_id, ha_daemon_url) {
+            let api_key = api_key.unwrap_or_default();
+            let mac = host_config.mac.clone();
+            let config = config.clone();
+            let state = Arc::clone(&state);
+            let mdns = Arc::clone(&mdns);
+            let current_service_info = Arc::clone(&current_service_info);
+            let host_config = host_config.clone();
+            let state_path = state_path.clone();
+            
+            std::thread::spawn(move || {
+                info!("Daemon started in paired state. Performing startup sync of boot options to HA...");
+                
+                // Parse the host's current GRUB entries
+                let entries_res = if let Some(ref gc) = config.grub {
+                    crate::grub::parse_grub_entries(&gc.path)
+                } else {
+                    if let Some(path) = crate::config::DEFAULT_GRUB_PATHS.iter().map(PathBuf::from).find(|p| p.exists()) {
+                        crate::grub::parse_grub_entries(&path)
+                    } else {
+                        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No GRUB config found"))
+                    }
+                };
+
+                match entries_res {
+                    Ok(entries) => {
+                        match crate::client::push_boot_options(
+                            &ha_daemon_url,
+                            &webhook_id,
+                            &api_key,
+                            &mac,
+                            &entries,
+                        ) {
+                            Ok(()) => {
+                                info!("Startup sync of boot options completed successfully!");
+                            }
+                            Err(err) => {
+                                error!("Startup sync of boot options failed: {}", err);
+                                if err.to_string().contains("Webhook unregistered") {
+                                    warn!("Home Assistant indicates the webhook is unregistered/deleted. Resetting local pairing state to unpaired...");
+                                    
+                                    // Reset internal state
+                                    {
+                                        let mut s = state.lock().unwrap();
+                                        s.paired = false;
+                                        s.token = None;
+                                    }
+                                    
+                                    // Delete state.json
+                                    let _ = std::fs::remove_file(&state_path);
+                                    
+                                    // Update mDNS advertisement to paired=false
+                                    let mut info = current_service_info.lock().unwrap();
+                                    let fullname = info.get_fullname().to_string();
+                                    let _ = mdns.unregister(&fullname);
+                                    
+                                    let mut properties = std::collections::HashMap::new();
+                                    properties.insert("mac".to_string(), host_config.mac.clone());
+                                    properties.insert("paired".to_string(), "false".to_string());
+                                    properties.insert("address".to_string(), host_config.address.clone());
+                                    
+                                    if let Ok(new_info) = mdns_sd::ServiceInfo::new(
+                                        "_grubstation._tcp.local.",
+                                        &host_config.address,
+                                        info.get_hostname(),
+                                        "",
+                                        info.get_port(),
+                                        Some(properties),
+                                    ) {
+                                        let new_info = new_info.enable_addr_auto();
+                                        if let Ok(()) = mdns.register(new_info.clone()) {
+                                            *info = new_info;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        error!("Failed to parse GRUB entries for startup sync: {}", err);
+                    }
+                }
+            });
         }
     }
 

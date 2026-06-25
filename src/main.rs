@@ -222,13 +222,19 @@ pub fn run_sync(config_path: &std::path::Path, dry_run: bool) -> Result<()> {
 
             println!("Syncing to Home Assistant...");
             println!("Payload to send: {}", serde_json::to_string(&payload)?);
-            crate::client::push_boot_options(
+            if let Err(err) = crate::client::push_boot_options(
                 ha_daemon_url,
                 webhook_id,
                 api_key,
                 &config.host.mac,
                 &entries,
-            )?;
+            ) {
+                if err.to_string().contains("Webhook unregistered") {
+                    eprintln!("Home Assistant indicates the webhook is unregistered/deleted. Resetting pairing state...");
+                    let _ = std::fs::remove_file(&state_path);
+                }
+                return Err(err);
+            }
             println!("Sync successful!");
         }
     } else {

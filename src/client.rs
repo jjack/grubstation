@@ -23,6 +23,7 @@ pub fn push_boot_options(
     );
 
     let payload = build_boot_options_payload(mac, entries);
+    log::info!("Sending boot options payload to HA (webhook: {}): {}", webhook_url, serde_json::to_string(&payload).unwrap_or_default());
 
     let mut request = ureq::post(&webhook_url)
         .timeout(std::time::Duration::from_secs(10));
@@ -30,17 +31,32 @@ pub fn push_boot_options(
         request = request.set("Authorization", &format!("Bearer {}", api_key));
     }
 
-    let response = request.send_json(payload).map_err(|e| match e {
-        ureq::Error::Status(code, resp) => {
+    let response_result = request.send_json(payload);
+    
+    let response = match response_result {
+        Ok(resp) => {
+            log::info!("Received successful response from HA (status {}).", resp.status());
+            resp
+        }
+        Err(ureq::Error::Status(code, resp)) => {
             let body = resp.into_string().unwrap_or_default();
-            anyhow::anyhow!("HTTP error response (status {}): {}", code, body)
+            log::error!("Received HTTP error response from HA (status {}): {}", code, body);
+            return Err(anyhow::anyhow!("HTTP error response (status {}): {}", code, body));
         }
-        ureq::Error::Transport(t) => {
-            anyhow::anyhow!("Transport error: {}", t)
+        Err(ureq::Error::Transport(t)) => {
+            log::error!("Transport error communicating with HA: {}", t);
+            return Err(anyhow::anyhow!("Transport error: {}", t));
         }
-    })?;
+    };
 
     if response.status() >= 200 && response.status() < 300 {
+        let body = response.into_string().unwrap_or_default();
+        log::info!("HA Response body: {}", body);
+        let body_lower = body.to_lowercase();
+        if !body_lower.contains("success") {
+            log::error!("HA webhook returned 200 but body indicates it is unregistered: {}", body);
+            return Err(anyhow::anyhow!("Webhook unregistered on Home Assistant"));
+        }
         Ok(())
     } else {
         anyhow::bail!(
