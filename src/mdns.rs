@@ -2,19 +2,19 @@ use anyhow::Result;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use std::collections::HashMap;
 
-pub fn start_advertisement(config: &crate::config::Config) -> Result<(ServiceDaemon, ServiceInfo)> {
+pub fn start_advertisement(config: &crate::config::Config, mac: &str, address: &str) -> Result<(ServiceDaemon, ServiceInfo)> {
     let port = config.daemon.as_ref().map(|d| d.port).unwrap_or(crate::config::DEFAULT_DAEMON_PORT);
 
     let mdns = ServiceDaemon::new()?;
     let service_type = "_grubstation._tcp.local.";
-    let instance_name = config.host.address.clone();
+    let instance_name = address.to_string();
     let system_hostname = hostname::get()?.to_string_lossy().into_owned();
     let host_name = format!("{}.local.", system_hostname);
 
     let mut properties = HashMap::new();
-    properties.insert("mac".to_string(), config.host.mac.clone());
+    properties.insert("mac".to_string(), mac.to_string());
     properties.insert("paired".to_string(), "false".to_string());
-    properties.insert("address".to_string(), config.host.address.clone());
+    properties.insert("address".to_string(), address.to_string());
 
     let service_info = ServiceInfo::new(
         service_type,

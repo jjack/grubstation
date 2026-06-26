@@ -20,6 +20,7 @@ pub struct PairRequest {
 struct DaemonState {
     paired: bool,
     token: Option<String>,
+    setup_pin: Option<String>,
 }
 
 pub fn start_server(
@@ -27,6 +28,8 @@ pub fn start_server(
     config_path: PathBuf,
     mdns: ServiceDaemon,
     service_info: ServiceInfo,
+    mac: String,
+    address: String,
     is_temp: bool,
 ) -> Result<()> {
     let port = config.daemon.as_ref().map(|d| d.port).unwrap_or(crate::config::DEFAULT_DAEMON_PORT);
@@ -37,6 +40,7 @@ pub fn start_server(
     
     let mut initial_paired = false;
     let mut initial_token = None;
+    let mut initial_setup_pin = None;
     let mut webhook_id = None;
     let mut api_key = None;
     let mut ha_daemon_url = None;
@@ -46,6 +50,7 @@ pub fn start_server(
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
                 initial_paired = val["paired"].as_bool().unwrap_or(false);
                 initial_token = val["token"].as_str().map(|s| s.to_string());
+                initial_setup_pin = val["setup_pin"].as_str().map(|s| s.to_string());
                 webhook_id = val["webhook_id"].as_str().map(|s| s.to_string());
                 api_key = val["api_key"].as_str().map(|s| s.to_string());
                 ha_daemon_url = val["ha_daemon_url"].as_str().map(|s| s.to_string());
@@ -56,9 +61,9 @@ pub fn start_server(
     let state = Arc::new(Mutex::new(DaemonState {
         paired: initial_paired,
         token: initial_token,
+        setup_pin: initial_setup_pin,
     }));
 
-    let host_config = config.host.clone();
     let mdns = Arc::new(mdns);
     let current_service_info = Arc::new(Mutex::new(service_info));
     let config = config.clone();
@@ -70,13 +75,13 @@ pub fn start_server(
         let _ = mdns.unregister(&fullname);
 
         let mut properties = std::collections::HashMap::new();
-        properties.insert("mac".to_string(), host_config.mac.clone());
+        properties.insert("mac".to_string(), mac.clone());
         properties.insert("paired".to_string(), "true".to_string());
-        properties.insert("address".to_string(), host_config.address.clone());
+        properties.insert("address".to_string(), address.clone());
 
         if let Ok(new_info) = mdns_sd::ServiceInfo::new(
             "_grubstation._tcp.local.",
-            &host_config.address,
+            &address,
             info.get_hostname(),
             "",
             info.get_port(),
@@ -91,12 +96,12 @@ pub fn start_server(
         // Trigger startup sync of boot options to Home Assistant
         if let (Some(webhook_id), Some(ha_daemon_url)) = (webhook_id, ha_daemon_url) {
             let api_key = api_key.unwrap_or_default();
-            let mac = host_config.mac.clone();
+            let sync_mac = mac.clone();
             let config = config.clone();
             let state = Arc::clone(&state);
             let mdns = Arc::clone(&mdns);
             let current_service_info = Arc::clone(&current_service_info);
-            let host_config = host_config.clone();
+            let shutdown_address = address.clone();
             let state_path = state_path.clone();
             
             std::thread::spawn(move || {
@@ -119,7 +124,7 @@ pub fn start_server(
                             &ha_daemon_url,
                             &webhook_id,
                             &api_key,
-                            &mac,
+                            &sync_mac,
                             &entries,
                         ) {
                             Ok(()) => {
@@ -146,13 +151,13 @@ pub fn start_server(
                                     let _ = mdns.unregister(&fullname);
                                     
                                     let mut properties = std::collections::HashMap::new();
-                                    properties.insert("mac".to_string(), host_config.mac.clone());
+                                    properties.insert("mac".to_string(), sync_mac.clone());
                                     properties.insert("paired".to_string(), "false".to_string());
-                                    properties.insert("address".to_string(), host_config.address.clone());
+                                    properties.insert("address".to_string(), shutdown_address.clone());
                                     
                                     if let Ok(new_info) = mdns_sd::ServiceInfo::new(
                                         "_grubstation._tcp.local.",
-                                        &host_config.address,
+                                        &shutdown_address,
                                         info.get_hostname(),
                                         "",
                                         info.get_port(),
@@ -175,6 +180,8 @@ pub fn start_server(
         }
     }
 
+    let loop_mac = mac.clone();
+    let loop_address = address.clone();
     thread::spawn(move || {
         for request in server.incoming_requests() {
             if let Err(e) = handle_request(
@@ -182,7 +189,8 @@ pub fn start_server(
                 Arc::clone(&state),
                 Arc::clone(&mdns),
                 Arc::clone(&current_service_info),
-                host_config.clone(),
+                loop_mac.clone(),
+                loop_address.clone(),
                 config.clone(),
                 config_path.clone(),
                 is_temp,
@@ -200,7 +208,8 @@ fn handle_request(
     state: Arc<Mutex<DaemonState>>,
     mdns: Arc<ServiceDaemon>,
     current_service_info: Arc<Mutex<ServiceInfo>>,
-    host_config: crate::config::HostConfig,
+    mac: String,
+    address: String,
     config: crate::config::Config,
     config_path: PathBuf,
     is_temp: bool,
@@ -252,7 +261,7 @@ fn handle_request(
                     "error": "Already paired"
                 }))?;
             } else {
-                if let Some(ref pin) = config.setup_pin {
+                if let Some(ref pin) = s.setup_pin {
                     let provided_token = get_bearer_token(&request);
                     if provided_token.is_none() || provided_token.as_ref() != Some(pin) {
                         send_json(request, 401, json!({
@@ -337,6 +346,7 @@ fn handle_request(
                 let token = generate_token();
                 s.paired = true;
                 s.token = Some(token.clone());
+                s.setup_pin = None;
 
                 // Update mDNS advertisement
                 let mut info = current_service_info.lock().unwrap();
@@ -345,15 +355,15 @@ fn handle_request(
 
                 // Create new ServiceInfo with paired=true
                 let service_type = "_grubstation._tcp.local.";
-                let instance_name = host_config.address.clone();
+                let instance_name = address.clone();
                 let system_hostname = hostname::get().unwrap().to_string_lossy().into_owned();
                 let host_name = format!("{}.local.", system_hostname);
                 let port = info.get_port();
 
                 let mut properties = std::collections::HashMap::new();
-                properties.insert("mac".to_string(), host_config.mac.clone());
+                properties.insert("mac".to_string(), mac.clone());
                 properties.insert("paired".to_string(), "true".to_string());
-                properties.insert("address".to_string(), host_config.address.clone());
+                properties.insert("address".to_string(), address.clone());
 
                 if let Ok(new_info) = mdns_sd::ServiceInfo::new(
                     service_type,
@@ -395,7 +405,7 @@ fn handle_request(
                 let ha_daemon_url = pair_req.ha_daemon_url.clone();
                 let webhook_id = pair_req.webhook_id.clone();
                 let api_key = pair_req.api_key.clone();
-                let mac = host_config.mac.clone();
+                let mac = mac.clone();
                 std::thread::spawn(move || {
                     // Sleep 500ms to let Home Assistant register the webhook endpoint
                     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -451,15 +461,15 @@ fn handle_request(
 
                 // Create new ServiceInfo with paired=false
                 let service_type = "_grubstation._tcp.local.";
-                let instance_name = host_config.address.clone();
+                let instance_name = address.clone();
                 let system_hostname = hostname::get().unwrap().to_string_lossy().into_owned();
                 let host_name = format!("{}.local.", system_hostname);
                 let port = info.get_port();
 
                 let mut properties = std::collections::HashMap::new();
-                properties.insert("mac".to_string(), host_config.mac.clone());
+                properties.insert("mac".to_string(), mac.clone());
                 properties.insert("paired".to_string(), "false".to_string());
-                properties.insert("address".to_string(), host_config.address.clone());
+                properties.insert("address".to_string(), address.clone());
 
                 if let Ok(new_info) = mdns_sd::ServiceInfo::new(
                     service_type,
@@ -609,8 +619,7 @@ mod tests {
 
         let config = crate::config::Config {
             host: crate::config::HostConfig {
-                mac: "00:11:22:33:44:55".to_string(),
-                address: "127.0.0.1".to_string(),
+                interface: "lo".to_string(),
             },
             daemon: Some(crate::config::DaemonConfig { port: daemon_port }),
             wake_on_lan: None,
@@ -623,8 +632,10 @@ mod tests {
             api_key: None,
             ha_daemon_url: None,
             ha_grub_url: None,
-            setup_pin: None,
         };
+
+        let (mac, address) = crate::config::resolve_interface_details("lo").unwrap();
+        let expected_mac = mac.clone();
 
         // Start mock HA webhook server
         let ha_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -646,7 +657,7 @@ mod tests {
                 req.as_reader().read_to_string(&mut body).unwrap();
                 let json_body: serde_json::Value = serde_json::from_str(&body).unwrap();
                 assert_eq!(json_body["action"], "update_boot_options");
-                assert_eq!(json_body["mac"], "00:11:22:33:44:55");
+                assert_eq!(json_body["mac"], expected_mac);
                 let options = json_body["boot_options"].as_array().unwrap();
                 assert_eq!(options.len(), 2);
                 assert_eq!(options[0].as_str().unwrap(), "Ubuntu");
@@ -669,7 +680,7 @@ mod tests {
             None,
         )?.enable_addr_auto();
         
-        start_server(&config, config_path.clone(), mdns, service_info, false)?;
+        start_server(&config, config_path.clone(), mdns, service_info, mac, address, false)?;
         
         // Wait a tiny bit for server to spin up
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -729,8 +740,7 @@ mod tests {
 
         let config = crate::config::Config {
             host: crate::config::HostConfig {
-                mac: "00:11:22:33:44:55".to_string(),
-                address: "127.0.0.1".to_string(),
+                interface: "lo".to_string(),
             },
             daemon: Some(crate::config::DaemonConfig { port: daemon_port }),
             wake_on_lan: None,
@@ -743,8 +753,15 @@ mod tests {
             api_key: None,
             ha_daemon_url: None,
             ha_grub_url: None,
-            setup_pin: Some("654321".to_string()),
         };
+
+        // Write mock state.json containing setup_pin and paired: false
+        let state_path = config_path.parent().unwrap_or(Path::new(".")).join("state.json");
+        let state_data = serde_json::json!({
+            "paired": false,
+            "setup_pin": "654321",
+        });
+        std::fs::write(&state_path, serde_json::to_string_pretty(&state_data)?)?;
 
         // Start mock HA webhook server
         let ha_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -772,7 +789,8 @@ mod tests {
             None,
         )?.enable_addr_auto();
         
-        start_server(&config, config_path.clone(), mdns, service_info, false)?;
+        let (mac, address) = crate::config::resolve_interface_details("lo").unwrap();
+        start_server(&config, config_path.clone(), mdns, service_info, mac, address, false)?;
         
         // Wait a tiny bit for server to spin up
         std::thread::sleep(std::time::Duration::from_millis(100));

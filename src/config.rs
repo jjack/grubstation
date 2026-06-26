@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use validator::Validate;
 use std::str::FromStr;
 use std::net::IpAddr;
-use mac_address::MacAddress;
+use network_interface::NetworkInterfaceConfig;
 
 pub const DEFAULT_BROADCAST_ADDRESS: &str = "255.255.255.255";
 pub const DEFAULT_BROADCAST_PORT: u16 = 9;
@@ -21,30 +21,29 @@ const MAX_PORT: u16 = 65535;
 pub struct Config {
     #[validate(nested)]
     pub host: HostConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(nested)]
     pub daemon: Option<DaemonConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(nested)]
     pub wake_on_lan: Option<WakeOnLanConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(nested)]
     pub grub: Option<GrubConfig>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webhook_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ha_daemon_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ha_grub_url: Option<String>,
-    #[serde(default)]
-    pub setup_pin: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 pub struct HostConfig {
-    #[validate(custom(function = "validate_mac_address"))]
-    pub mac: String,
-    #[validate(custom(function = "validate_address"))]
-    pub address: String,
+    #[validate(length(min = 1))]
+    pub interface: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
@@ -68,32 +67,12 @@ pub struct GrubConfig {
     #[serde(default = "default_network_wait")]
     #[validate(range(min = 0, max = 300))]
     pub network_wait: u32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub webhook_id: String,
 }
 
 fn default_network_wait() -> u32 {
     10
-}
-
-fn validate_mac_address(mac: &str) -> Result<(), validator::ValidationError> {
-    if MacAddress::from_str(mac).is_ok() {
-        Ok(())
-    } else {
-        Err(validator::ValidationError::new("invalid_mac"))
-    }
-}
-
-fn validate_address(address: &str) -> Result<(), validator::ValidationError> {
-    let is_ipv4 = validate_ipv4(address).is_ok();
-    // Simple hostname/domain validation: alphanumeric, dots, and dashes, and not empty.
-    let is_hostname = !address.is_empty() && address.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-');
-    
-    if is_ipv4 || is_hostname {
-        Ok(())
-    } else {
-        Err(validator::ValidationError::new("invalid_address"))
-    }
 }
 
 fn validate_ipv4(address: &str) -> Result<(), validator::ValidationError> {
@@ -109,6 +88,18 @@ fn validate_file_exists(path: &Path) -> Result<(), validator::ValidationError> {
     } else {
         Err(validator::ValidationError::new("file_not_found"))
     }
+}
+
+pub fn resolve_interface_details(interface_name: &str) -> anyhow::Result<(String, String)> {
+    let interfaces = network_interface::NetworkInterface::show()
+        .map_err(|e| anyhow::anyhow!("Failed to list network interfaces: {}", e))?;
+    let itf = interfaces.into_iter().find(|i| i.name == interface_name)
+        .ok_or_else(|| anyhow::anyhow!("Interface '{}' not found", interface_name))?;
+    let mac = itf.mac_addr.ok_or_else(|| anyhow::anyhow!("Interface '{}' has no MAC address", interface_name))?;
+    let addr = itf.addr.into_iter()
+        .find(|a| a.ip().is_ipv4())
+        .ok_or_else(|| anyhow::anyhow!("Interface '{}' has no IPv4 address", interface_name))?;
+    Ok((mac, addr.ip().to_string()))
 }
 
 pub fn get_default_config_path() -> PathBuf {
@@ -144,8 +135,7 @@ mod tests {
     fn create_valid_config() -> Config {
         Config {
             host: HostConfig {
-                mac: "00:11:22:33:44:55".to_string(),
-                address: "127.0.0.1".to_string(),
+                interface: "lo".to_string(),
             },
             daemon: Some(DaemonConfig { port: DEFAULT_DAEMON_PORT }),
             wake_on_lan: Some(WakeOnLanConfig {
@@ -161,7 +151,6 @@ mod tests {
             api_key: None,
             ha_daemon_url: None,
             ha_grub_url: None,
-            setup_pin: None,
         }
     }
 
@@ -175,8 +164,7 @@ mod tests {
     fn test_minimal_config() {
         let config = Config {
             host: HostConfig {
-                mac: "00:11:22:33:44:55".to_string(),
-                address: "127.0.0.1".to_string(),
+                interface: "lo".to_string(),
             },
             daemon: None,
             wake_on_lan: None,
@@ -185,36 +173,24 @@ mod tests {
             api_key: None,
             ha_daemon_url: None,
             ha_grub_url: None,
-            setup_pin: None,
         };
         assert!(config.validate().is_ok());
+
+        // Verify that optional fields are skipped when serializing
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        assert!(!yaml.contains("webhook_id"));
+        assert!(!yaml.contains("api_key"));
+        assert!(!yaml.contains("ha_daemon_url"));
+        assert!(!yaml.contains("ha_grub_url"));
+        assert!(!yaml.contains("daemon"));
+        assert!(!yaml.contains("wake_on_lan"));
+        assert!(!yaml.contains("grub"));
     }
 
     #[test]
-    fn test_invalid_mac() {
+    fn test_empty_interface() {
         let mut config = create_valid_config();
-        config.host.mac = "invalid".to_string();
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_invalid_address() {
-        let mut config = create_valid_config();
-        config.host.address = "not valid!".to_string();
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_invalid_ip_v6() {
-        let mut config = create_valid_config();
-        config.host.address = "::1".to_string();
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_empty_address() {
-        let mut config = create_valid_config();
-        config.host.address = "".to_string();
+        config.host.interface = "".to_string();
         assert!(config.validate().is_err());
     }
 
