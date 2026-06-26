@@ -286,6 +286,8 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
         InstallMode::DaemonShutdownOnly => None,
     };
 
+    let setup_pin = format!("{:06}", fastrand::u32(0..1_000_000));
+
     let config = crate::config::Config {
         host: crate::config::HostConfig { mac, address: ip },
         daemon,
@@ -295,6 +297,7 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
         api_key: None,
         ha_daemon_url: None,
         ha_grub_url: None,
+        setup_pin: Some(setup_pin.clone()),
     };
 
     // Save config
@@ -305,8 +308,8 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
     std::fs::write(config_path, yaml)?;
 
     outro(format!(
-        "Configuration saved to {:?}. Success!",
-        config_path
+        "Configuration saved to {:?}. Success!\n\nSetup Pairing PIN: \x1b[1m{}\x1b[0m",
+        config_path, setup_pin
     ))?;
 
     if let Some(ref grub_config) = config.grub {
@@ -494,6 +497,7 @@ mod tests {
             api_key: None,
             ha_daemon_url: None,
             ha_grub_url: None,
+            setup_pin: None,
         };
         let grub_config = config.grub.as_ref().unwrap();
 

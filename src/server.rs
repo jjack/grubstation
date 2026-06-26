@@ -252,6 +252,16 @@ fn handle_request(
                     "error": "Already paired"
                 }))?;
             } else {
+                if let Some(ref pin) = config.setup_pin {
+                    let provided_token = get_bearer_token(&request);
+                    if provided_token.is_none() || provided_token.as_ref() != Some(pin) {
+                        send_json(request, 401, json!({
+                            "error": "Unauthorized"
+                        }))?;
+                        return Ok(());
+                    }
+                }
+
                 let mut content = String::new();
                 if let Err(e) = request.as_reader().read_to_string(&mut content) {
                     send_json(request, 400, json!({
@@ -613,6 +623,7 @@ mod tests {
             api_key: None,
             ha_daemon_url: None,
             ha_grub_url: None,
+            setup_pin: None,
         };
 
         // Start mock HA webhook server
@@ -641,7 +652,7 @@ mod tests {
                 assert_eq!(options[0].as_str().unwrap(), "Ubuntu");
                 assert_eq!(options[1].as_str().unwrap(), "Advanced>Kernel 2");
 
-                let response = tiny_http::Response::from_string("{\"success\": true}")
+                let response = tiny_http::Response::from_string("{\"status\": \"ok\"}")
                     .with_status_code(200);
                 req.respond(response).unwrap();
             }
@@ -692,6 +703,117 @@ mod tests {
         assert_eq!(state_json["api_key"].as_str().unwrap(), "test-api-key");
         assert_eq!(state_json["ha_daemon_url"].as_str().unwrap(), format!("http://127.0.0.1:{}", ha_port));
         assert_eq!(state_json["ha_grub_url"].as_str().unwrap(), "http://127.0.0.1/grub");
+
+        // Wait for the mock HA thread to finish
+        handle.join().unwrap();
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_pairing_endpoint_with_setup_pin() -> Result<()> {
+        let dir = tempdir()?;
+        let grub_path = dir.path().join("grub.cfg");
+        let mut grub_file = File::create(&grub_path)?;
+        writeln!(grub_file, "menuentry 'Ubuntu' {{")?;
+        writeln!(grub_file, "  echo 1")?;
+        writeln!(grub_file, "}}")?;
+        grub_file.sync_all()?;
+
+        let config_path = dir.path().join("config.yaml");
+
+        // We bind to ephemeral port (0) for daemon and mock HA
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let daemon_port = listener.local_addr()?.port();
+        drop(listener);
+
+        let config = crate::config::Config {
+            host: crate::config::HostConfig {
+                mac: "00:11:22:33:44:55".to_string(),
+                address: "127.0.0.1".to_string(),
+            },
+            daemon: Some(crate::config::DaemonConfig { port: daemon_port }),
+            wake_on_lan: None,
+            grub: Some(crate::config::GrubConfig {
+                path: grub_path,
+                network_wait: 10,
+                webhook_id: "init-webhook".to_string(),
+            }),
+            webhook_id: None,
+            api_key: None,
+            ha_daemon_url: None,
+            ha_grub_url: None,
+            setup_pin: Some("654321".to_string()),
+        };
+
+        // Start mock HA webhook server
+        let ha_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let ha_port = ha_listener.local_addr()?.port();
+        let ha_server = tiny_http::Server::from_listener(ha_listener, None)
+            .map_err(|e| anyhow::anyhow!("Failed to start HA server: {}", e))?;
+
+        let handle = std::thread::spawn(move || {
+            if let Some(req) = ha_server.incoming_requests().next() {
+                assert_eq!(req.url(), "/api/webhook/test-webhook-id");
+                let response = tiny_http::Response::from_string("{\"status\": \"ok\"}")
+                    .with_status_code(200);
+                req.respond(response).unwrap();
+            }
+        });
+
+        // Start daemon server
+        let mdns = ServiceDaemon::new()?;
+        let service_info = mdns_sd::ServiceInfo::new(
+            "_grubstation._tcp.local.",
+            "127.0.0.1",
+            "test.local.",
+            "",
+            daemon_port,
+            None,
+        )?.enable_addr_auto();
+        
+        start_server(&config, config_path.clone(), mdns, service_info, false)?;
+        
+        // Wait a tiny bit for server to spin up
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let pair_payload = serde_json::json!({
+            "webhook_id": "test-webhook-id",
+            "api_key": "test-api-key",
+            "ha_daemon_url": format!("http://127.0.0.1:{}", ha_port),
+            "ha_grub_url": "http://127.0.0.1/grub",
+            "apply_config": false,
+        });
+
+        // 1. Attempt to pair with no auth token (should fail with 401)
+        let res_no_auth = ureq::post(&format!("http://127.0.0.1:{}/pair", daemon_port))
+            .send_json(pair_payload.clone());
+        assert!(res_no_auth.is_err());
+        if let Err(ureq::Error::Status(code, _)) = res_no_auth {
+            assert_eq!(code, 401);
+        } else {
+            panic!("Expected status error 401");
+        }
+
+        // 2. Attempt to pair with invalid auth token (should fail with 401)
+        let res_bad_auth = ureq::post(&format!("http://127.0.0.1:{}/pair", daemon_port))
+            .set("Authorization", "Bearer 111111")
+            .send_json(pair_payload.clone());
+        assert!(res_bad_auth.is_err());
+        if let Err(ureq::Error::Status(code, _)) = res_bad_auth {
+            assert_eq!(code, 401);
+        } else {
+            panic!("Expected status error 401");
+        }
+
+        // 3. Attempt to pair with correct setup pin (should succeed)
+        let res = ureq::post(&format!("http://127.0.0.1:{}/pair", daemon_port))
+            .set("Authorization", "Bearer 654321")
+            .send_json(pair_payload)?;
+
+        assert_eq!(res.status(), 200);
+        let res_json: serde_json::Value = res.into_json()?;
+        assert!(res_json["success"].as_bool().unwrap());
 
         // Wait for the mock HA thread to finish
         handle.join().unwrap();

@@ -35,6 +35,8 @@ pub struct Config {
     pub ha_daemon_url: Option<String>,
     #[serde(default)]
     pub ha_grub_url: Option<String>,
+    #[serde(default)]
+    pub setup_pin: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
@@ -159,6 +161,7 @@ mod tests {
             api_key: None,
             ha_daemon_url: None,
             ha_grub_url: None,
+            setup_pin: None,
         }
     }
 
@@ -182,6 +185,7 @@ mod tests {
             api_key: None,
             ha_daemon_url: None,
             ha_grub_url: None,
+            setup_pin: None,
         };
         assert!(config.validate().is_ok());
     }

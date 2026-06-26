@@ -324,7 +324,7 @@ mod tests {
                 assert_eq!(json_body["mac"], "00:11:22:33:44:55");
                 assert_eq!(json_body["boot_options"].as_array().unwrap()[0].as_str().unwrap(), "Ubuntu");
 
-                let response = tiny_http::Response::from_string("{\"success\": true}")
+                let response = tiny_http::Response::from_string("{\"status\": \"ok\"}")
                     .with_status_code(200);
                 req.respond(response).unwrap();
             }
@@ -392,7 +392,7 @@ mod tests {
                 assert_eq!(json_body["action"], "update_boot_options");
                 assert_eq!(json_body["mac"], "00:11:22:33:44:55");
 
-                let response = tiny_http::Response::from_string("{\"success\": true}")
+                let response = tiny_http::Response::from_string("{\"status\": \"ok\"}")
                     .with_status_code(200);
                 req.respond(response).unwrap();
             }
