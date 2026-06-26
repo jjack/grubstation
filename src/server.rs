@@ -177,18 +177,18 @@ pub fn start_server(
 
     thread::spawn(move || {
         for request in server.incoming_requests() {
-            let state = Arc::clone(&state);
-            let mdns = Arc::clone(&mdns);
-            let current_service_info = Arc::clone(&current_service_info);
-            let host_config = host_config.clone();
-            let config = config.clone();
-            let config_path = config_path.clone();
-
-            thread::spawn(move || {
-                if let Err(e) = handle_request(request, state, mdns, current_service_info, host_config, config, config_path, is_temp) {
-                    error!("Error handling request: {}", e);
-                }
-            });
+            if let Err(e) = handle_request(
+                request,
+                Arc::clone(&state),
+                Arc::clone(&mdns),
+                Arc::clone(&current_service_info),
+                host_config.clone(),
+                config.clone(),
+                config_path.clone(),
+                is_temp,
+            ) {
+                error!("Error handling request: {}", e);
+            }
         }
     });
 
