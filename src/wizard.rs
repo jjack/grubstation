@@ -119,8 +119,8 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
             if virtual_patterns.iter().any(|p| itf.name.starts_with(p)) {
                 return false;
             }
-            // Must have a MAC address and at least one IP
-            itf.mac_addr.is_some() && !itf.addr.is_empty()
+            // Must have a MAC address and at least one IPv4 address
+            itf.mac_addr.is_some() && itf.addr.iter().any(|a| a.ip().is_ipv4())
         })
         .collect();
 
@@ -131,7 +131,10 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
     let items: Vec<_> = filtered_interfaces
         .iter()
         .map(|itf| {
-            let ips: Vec<_> = itf.addr.iter().map(|a| a.ip().to_string()).collect();
+            let ips: Vec<_> = itf.addr.iter()
+                .filter(|a| a.ip().is_ipv4())
+                .map(|a| a.ip().to_string())
+                .collect();
             let label = format!(
                 "{} (MAC: {}, IPs: {})",
                 itf.name,
@@ -156,27 +159,38 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
     // Select host address (IP, Hostname, or FQDN)
     let mut address_options = Vec::new();
 
-    // Add IP addresses
+    // Add IP addresses (IPv4 only)
     for addr in &selected_itf.addr {
-        let ip = addr.ip().to_string();
-        address_options.push((ip.clone(), format!("{} (IP Address - Ensure this is static!)", ip), ""));
+        if addr.ip().is_ipv4() {
+            let ip = addr.ip().to_string();
+            address_options.push((ip.clone(), format!("{} (IP Address - Ensure this is static!)", ip), ""));
+        }
     }
 
-    // Add Hostname
+    // Add Hostname and FQDN
     if let Ok(h) = hostname::get() {
         let h_str = h.to_string_lossy().into_owned();
-        address_options.push((h_str.clone(), format!("{} (Hostname)", h_str), ""));
 
         // Try to get FQDN
-        if let Ok(mut addrs) = dns_lookup::getaddrinfo(Some(&h_str), None, None) {
+        let mut fqdn = None;
+        let mut hints = dns_lookup::AddrInfoHints::default();
+        hints.flags = libc::AI_CANONNAME;
+
+        if let Ok(mut addrs) = dns_lookup::getaddrinfo(Some(&h_str), None, Some(hints)) {
             if let Some(Ok(info)) = addrs.next() {
                 if let Some(canon) = info.canonname {
                     if canon != h_str {
-                        address_options.push((canon.clone(), format!("{} (FQDN)", canon), ""));
+                        fqdn = Some(canon);
                     }
                 }
             }
         }
+
+        if let Some(canon) = fqdn {
+            address_options.push((canon.clone(), format!("{} (FQDN)", canon), ""));
+        }
+
+        address_options.push((h_str.clone(), format!("{} (Hostname)", h_str), ""));
     }
 
     let ip = if address_options.len() == 1 {

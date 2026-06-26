@@ -686,6 +686,7 @@ dependencies = [
  "env_logger",
  "fastrand",
  "hostname",
+ "libc",
  "log",
  "mac_address",
  "mdns-sd",
