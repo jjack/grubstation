@@ -1,7 +1,13 @@
 use std::fs::File;
 use std::io::{self, BufRead};
 use std::path::Path;
+use std::sync::LazyLock;
 use regex::Regex;
+
+static MENUENTRY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^\s*menuentry\s+['"]([^'"]+)['"]"#).unwrap());
+static SUBMENU_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^\s*submenu\s+['"]([^'"]+)['"]"#).unwrap());
 
 pub fn parse_grub_entries(path: &Path) -> io::Result<Vec<String>> {
     log::info!("Parsing GRUB entries from {:?}", path);
@@ -12,23 +18,18 @@ pub fn parse_grub_entries(path: &Path) -> io::Result<Vec<String>> {
     let mut brace_depth = 0;
     let mut submenu_depths = Vec::new();
 
-    // Regex to match menuentry 'Title' ... {
-    let menuentry_re = Regex::new(r#"^\s*menuentry\s+['"]([^'"]+)['"]"#).unwrap();
-    // Regex to match submenu 'Title' ... {
-    let submenu_re = Regex::new(r#"^\s*submenu\s+['"]([^'"]+)['"]"#).unwrap();
-
     for line in reader.lines() {
         let line = line?;
         let trimmed = line.trim();
 
-        if let Some(caps) = submenu_re.captures(trimmed) {
+        if let Some(caps) = SUBMENU_RE.captures(trimmed) {
             let title = caps.get(1).unwrap().as_str().to_string();
             submenu_stack.push(title);
             submenu_depths.push(brace_depth);
             if trimmed.contains('{') {
                 brace_depth += 1;
             }
-        } else if let Some(caps) = menuentry_re.captures(trimmed) {
+        } else if let Some(caps) = MENUENTRY_RE.captures(trimmed) {
             let title = caps.get(1).unwrap().as_str().to_string();
             let mut full_path = submenu_stack.clone();
             full_path.push(title);
