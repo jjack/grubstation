@@ -68,9 +68,10 @@ fn main() -> Result<()> {
             println!("Starting the long-running process...");
             let config = config::load_config(&config_path).map_err(|e| anyhow::anyhow!("{}", e))?;
             let port = config.daemon.as_ref().map(|d| d.port).unwrap_or(config::DEFAULT_DAEMON_PORT);
+            let (mac, address) = config::resolve_interface_details(&config.host.interface)?;
 
-            let (mdns, service_info) = mdns::start_advertisement(&config)?;
-            server::start_server(&config, config_path.clone(), mdns, service_info, false)?;
+            let (mdns, service_info) = mdns::start_advertisement(&config, &mac, &address)?;
+            server::start_server(&config, config_path.clone(), mdns, service_info, mac, address, false)?;
             println!("Grubstation daemon is running and advertising service via mDNS on port {}...", port);
 
             let (tx, rx) = std::sync::mpsc::channel();
@@ -104,11 +105,12 @@ fn main() -> Result<()> {
 
                 // Push initial boot options
                 println!("Pushing initial boot options to Home Assistant...");
+                let (mac, _address) = config::resolve_interface_details(&config.host.interface)?;
                 crate::client::push_boot_options(
                     &pair_req.ha_daemon_url,
                     &pair_req.webhook_id,
                     &pair_req.api_key,
-                    &config.host.mac,
+                    &mac,
                     &entries,
                 )?;
 
@@ -158,9 +160,10 @@ fn main() -> Result<()> {
                 println!("Starting temporary pairing server...");
                 let config = config::load_config(&config_path).map_err(|e| anyhow::anyhow!("{}", e))?;
                 let port = config.daemon.as_ref().map(|d| d.port).unwrap_or(config::DEFAULT_DAEMON_PORT);
+                let (mac, address) = config::resolve_interface_details(&config.host.interface)?;
 
-                let (mdns, service_info) = mdns::start_advertisement(&config)?;
-                server::start_server(&config, config_path.clone(), mdns, service_info, true)?;
+                let (mdns, service_info) = mdns::start_advertisement(&config, &mac, &address)?;
+                server::start_server(&config, config_path.clone(), mdns, service_info, mac, address, true)?;
                 
                 println!("Temporary pairing server is running and advertising via mDNS on port {}...", port);
                 println!("This server will automatically exit after successful pairing or in 5 minutes.");
@@ -195,7 +198,8 @@ pub fn run_sync(config_path: &std::path::Path, dry_run: bool) -> Result<()> {
     if let Some(ref grub_config) = config.grub {
         let entries = grub::parse_grub_entries(&grub_config.path)?;
 
-        let payload = crate::client::build_boot_options_payload(&config.host.mac, &entries);
+        let (mac, _address) = config::resolve_interface_details(&config.host.interface)?;
+        let payload = crate::client::build_boot_options_payload(&mac, &entries);
 
         if dry_run {
             eprintln!("Performing a dry-run sync: dumping formatted output to stdout...");
@@ -226,7 +230,7 @@ pub fn run_sync(config_path: &std::path::Path, dry_run: bool) -> Result<()> {
                 ha_daemon_url,
                 webhook_id,
                 api_key,
-                &config.host.mac,
+                &mac,
                 &entries,
             ) {
                 if err.to_string().contains("Webhook unregistered") {
@@ -263,8 +267,7 @@ mod tests {
         let config_path = dir.path().join("config.yaml");
         let mut config_file = File::create(&config_path)?;
         writeln!(config_file, "host:")?;
-        writeln!(config_file, "  mac: \"00:11:22:33:44:55\"")?;
-        writeln!(config_file, "  address: \"127.0.0.1\"")?;
+        writeln!(config_file, "  interface: \"lo\"")?;
         writeln!(config_file, "grub:")?;
         writeln!(config_file, "  path: {:?}", grub_path)?;
         writeln!(config_file, "  network_wait: 10")?;
@@ -293,13 +296,15 @@ mod tests {
         let config_path = dir.path().join("config.yaml");
         let mut config_file = File::create(&config_path)?;
         writeln!(config_file, "host:")?;
-        writeln!(config_file, "  mac: \"00:11:22:33:44:55\"")?;
-        writeln!(config_file, "  address: \"127.0.0.1\"")?;
+        writeln!(config_file, "  interface: \"lo\"")?;
         writeln!(config_file, "grub:")?;
         writeln!(config_file, "  path: {:?}", grub_path)?;
         writeln!(config_file, "  network_wait: 10")?;
         writeln!(config_file, "  webhook_id: \"test-webhook\"")?;
         config_file.sync_all()?;
+
+        let (mac, _address) = config::resolve_interface_details("lo").unwrap();
+        let expected_mac = mac.clone();
 
         // Start mock HA server
         let ha_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -321,7 +326,7 @@ mod tests {
                 req.as_reader().read_to_string(&mut body).unwrap();
                 let json_body: serde_json::Value = serde_json::from_str(&body).unwrap();
                 assert_eq!(json_body["action"], "update_boot_options");
-                assert_eq!(json_body["mac"], "00:11:22:33:44:55");
+                assert_eq!(json_body["mac"], expected_mac);
                 assert_eq!(json_body["boot_options"].as_array().unwrap()[0].as_str().unwrap(), "Ubuntu");
 
                 let response = tiny_http::Response::from_string("{\"status\": \"ok\"}")
@@ -362,13 +367,15 @@ mod tests {
         let config_path = dir.path().join("config.yaml");
         let mut config_file = File::create(&config_path)?;
         writeln!(config_file, "host:")?;
-        writeln!(config_file, "  mac: \"00:11:22:33:44:55\"")?;
-        writeln!(config_file, "  address: \"127.0.0.1\"")?;
+        writeln!(config_file, "  interface: \"lo\"")?;
         writeln!(config_file, "grub:")?;
         writeln!(config_file, "  path: {:?}", grub_path)?;
         writeln!(config_file, "  network_wait: 10")?;
         writeln!(config_file, "  webhook_id: \"test-webhook\"")?;
         config_file.sync_all()?;
+
+        let (mac, _address) = config::resolve_interface_details("lo").unwrap();
+        let expected_mac = mac.clone();
 
         // Start mock HA server
         let ha_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -390,7 +397,7 @@ mod tests {
                 req.as_reader().read_to_string(&mut body).unwrap();
                 let json_body: serde_json::Value = serde_json::from_str(&body).unwrap();
                 assert_eq!(json_body["action"], "update_boot_options");
-                assert_eq!(json_body["mac"], "00:11:22:33:44:55");
+                assert_eq!(json_body["mac"], expected_mac);
 
                 let response = tiny_http::Response::from_string("{\"status\": \"ok\"}")
                     .with_status_code(200);
@@ -415,12 +422,12 @@ mod tests {
                 let pair_req: crate::server::PairRequest = serde_json::from_str(&payload_val)?;
                 let config = config::load_config(&config_path).map_err(|e| anyhow::anyhow!("{}", e))?;
                 let entries = crate::grub::parse_grub_entries(&config.grub.as_ref().unwrap().path)?;
-                
+                let (mac, _address) = config::resolve_interface_details(&config.host.interface)?;
                 crate::client::push_boot_options(
                     &pair_req.ha_daemon_url,
                     &pair_req.webhook_id,
                     &pair_req.api_key,
-                    &config.host.mac,
+                    &mac,
                     &entries,
                 )?;
                 

@@ -154,12 +154,9 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
         )
         .interact()?;
 
-    let mac = selected_itf.mac_addr.as_ref().unwrap().clone();
-
-    // Select host address (IP, Hostname, or FQDN)
+    // Select host IP address (IPv4 only)
     let mut address_options = Vec::new();
 
-    // Add IP addresses (IPv4 only)
     for addr in &selected_itf.addr {
         if addr.ip().is_ipv4() {
             let ip = addr.ip().to_string();
@@ -167,36 +164,12 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
         }
     }
 
-    // Add Hostname and FQDN
-    if let Ok(h) = hostname::get() {
-        let h_str = h.to_string_lossy().into_owned();
-
-        // Try to get FQDN
-        let mut fqdn = None;
-        let mut hints = dns_lookup::AddrInfoHints::default();
-        hints.flags = libc::AI_CANONNAME;
-
-        if let Ok(mut addrs) = dns_lookup::getaddrinfo(Some(&h_str), None, Some(hints)) {
-            if let Some(Ok(info)) = addrs.next() {
-                if let Some(canon) = info.canonname {
-                    if canon != h_str {
-                        fqdn = Some(canon);
-                    }
-                }
-            }
-        }
-
-        if let Some(canon) = fqdn {
-            address_options.push((canon.clone(), format!("{} (FQDN)", canon), ""));
-        }
-
-        address_options.push((h_str.clone(), format!("{} (Hostname)", h_str), ""));
-    }
-
-    let ip = if address_options.len() == 1 {
+    let ip = if address_options.is_empty() {
+        anyhow::bail!("Selected interface '{}' has no IPv4 addresses", selected_itf.name);
+    } else if address_options.len() == 1 {
         address_options[0].0.clone()
     } else {
-        select("Host Address (Used for communication with the daemon)")
+        select("Host IP Address (Used for communication with the daemon)")
             .items(&address_options)
             .interact()?
     };
@@ -303,7 +276,7 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
     let setup_pin = format!("{:06}", fastrand::u32(0..1_000_000));
 
     let config = crate::config::Config {
-        host: crate::config::HostConfig { mac, address: ip },
+        host: crate::config::HostConfig { interface: selected_itf.name.clone() },
         daemon,
         wake_on_lan,
         grub,
@@ -311,7 +284,6 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
         api_key: None,
         ha_daemon_url: None,
         ha_grub_url: None,
-        setup_pin: Some(setup_pin.clone()),
     };
 
     // Save config
@@ -320,6 +292,16 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(config_path, yaml)?;
+
+    // Save initial state.json containing setup_pin and paired: false
+    let state_path = config_path.parent().unwrap_or(Path::new(".")).join("state.json");
+    let state_data = serde_json::json!({
+        "paired": false,
+        "setup_pin": setup_pin.clone(),
+    });
+    if let Ok(json_str) = serde_json::to_string_pretty(&state_data) {
+        let _ = std::fs::write(&state_path, json_str);
+    }
 
     outro(format!(
         "Configuration saved to {:?}. Success!\n\nSetup Pairing PIN: \x1b[1m{}\x1b[0m",
@@ -347,12 +329,13 @@ pub fn install_grub_hook_to_path(
     hook_path: &Path,
     ha_grub_url: Option<&str>,
 ) -> Result<()> {
+    let (mac, address) = crate::config::resolve_interface_details(&config.host.interface)?;
     let wait_list = (1..=grub_config.network_wait)
         .map(|i| i.to_string())
         .collect::<Vec<_>>()
         .join(" ");
 
-    let default_boot_url = format!("(http,{})/api/grubstation/{}?token={}", config.host.address, config.host.mac, grub_config.webhook_id);
+    let default_boot_url = format!("(http,{})/api/grubstation/{}?token={}", address, mac, grub_config.webhook_id);
     let boot_url = if let Some(url) = ha_grub_url {
         let url_without_proto = url.trim_start_matches("http://").trim_start_matches("https://");
         if let Some(pos) = url_without_proto.find('/') {
@@ -497,8 +480,7 @@ mod tests {
         let hook_path = dir.path().join("99_grubstation");
         let config = crate::config::Config {
             host: crate::config::HostConfig {
-                mac: "00:11:22:33:44:55".to_string(),
-                address: "192.168.1.100".to_string(),
+                interface: "lo".to_string(),
             },
             daemon: None,
             wake_on_lan: None,
@@ -511,14 +493,14 @@ mod tests {
             api_key: None,
             ha_daemon_url: None,
             ha_grub_url: None,
-            setup_pin: None,
         };
         let grub_config = config.grub.as_ref().unwrap();
 
         assert!(install_grub_hook_to_path(&config, grub_config, &hook_path, None).is_ok());
 
+        let (mac, address) = crate::config::resolve_interface_details("lo").unwrap();
         let content = std::fs::read_to_string(&hook_path).unwrap();
-        assert!(content.contains("set boot_url=\"(http,192.168.1.100)/api/grubstation/00:11:22:33:44:55?token=test-webhook-123\""));
+        assert!(content.contains(&format!("set boot_url=\"(http,{})/api/grubstation/{}?token=test-webhook-123\"", address, mac)));
         assert!(content.contains("for i in 1 2 3; do"));
     }
 }
