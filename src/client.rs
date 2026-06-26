@@ -52,9 +52,14 @@ pub fn push_boot_options(
     if response.status() >= 200 && response.status() < 300 {
         let body = response.into_string().unwrap_or_default();
         log::info!("HA Response body: {}", body);
-        let body_lower = body.to_lowercase();
-        if !body_lower.contains("success") {
-            log::error!("HA webhook returned 200 but body indicates it is unregistered: {}", body);
+        let trimmed = body.trim();
+        if trimmed.is_empty() {
+            log::error!("HA webhook returned 200 but body is empty, indicating it is unregistered");
+            return Err(anyhow::anyhow!("Webhook unregistered on Home Assistant"));
+        }
+        let body_lower = trimmed.to_lowercase();
+        if !body_lower.contains("ok") {
+            log::error!("HA webhook returned 200 but body indicates it is unregistered (no 'ok' status): {}", body);
             return Err(anyhow::anyhow!("Webhook unregistered on Home Assistant"));
         }
         Ok(())
