@@ -114,8 +114,8 @@ fn main() -> Result<()> {
                     &entries,
                 )?;
 
-                // If apply_config is true, install/apply the GRUB boot hook
-                if pair_req.apply_config {
+                // Always write/install the GRUB boot hook if GRUB is configured or defaults exist
+                if config.grub.is_some() || crate::config::DEFAULT_GRUB_PATHS.iter().map(std::path::PathBuf::from).any(|p| p.exists()) {
                     println!("Applying GRUB configuration...");
                     let mut grub_config = if let Some(ref gc) = config.grub {
                         gc.clone()
@@ -132,7 +132,7 @@ fn main() -> Result<()> {
                         }
                     };
                     grub_config.webhook_id = pair_req.webhook_id.clone();
-                    crate::wizard::install_grub_hook(&config, &grub_config, Some(&pair_req.ha_grub_url))?;
+                    crate::wizard::install_grub_hook(&config, &grub_config, Some(&pair_req.ha_grub_url), pair_req.update_grub)?;
                 }
 
                 // Generate a random token
@@ -357,6 +357,10 @@ mod tests {
     #[test]
     fn test_pair_subcommand_manual() -> Result<()> {
         let dir = tempdir()?;
+        let temp_hook_path = dir.path().join("99_grubstation");
+        unsafe {
+            std::env::set_var("GRUBSTATION_HOOK_PATH", temp_hook_path.to_str().unwrap());
+        }
         let grub_path = dir.path().join("grub.cfg");
         let mut grub_file = File::create(&grub_path)?;
         writeln!(grub_file, "menuentry 'Ubuntu' {{")?;
@@ -407,7 +411,7 @@ mod tests {
 
         // Run pair command via subcommand matching emulation
         let payload_str = format!(
-            "{{\"ha_daemon_url\":\"http://127.0.0.1:{}\",\"webhook_id\":\"test-webhook-id\",\"api_key\":\"test-api-key\",\"ha_grub_url\":\"http://127.0.0.1/grub\",\"apply_config\":false}}",
+            "{{\"ha_daemon_url\":\"http://127.0.0.1:{}\",\"webhook_id\":\"test-webhook-id\",\"api_key\":\"test-api-key\",\"ha_grub_url\":\"http://127.0.0.1/grub\",\"update_grub\":false}}",
             ha_port
         );
 

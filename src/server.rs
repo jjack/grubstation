@@ -14,7 +14,7 @@ pub struct PairRequest {
     pub api_key: String,
     pub ha_daemon_url: String,
     pub ha_grub_url: String,
-    pub apply_config: bool,
+    pub update_grub: bool,
 }
 
 struct DaemonState {
@@ -313,8 +313,8 @@ fn handle_request(
                 };
 
 
-                // If apply_config is true, install/apply the GRUB boot hook
-                if pair_req.apply_config {
+                // Always write/install the GRUB boot hook if GRUB is configured or defaults exist
+                if config.grub.is_some() || crate::config::DEFAULT_GRUB_PATHS.iter().map(PathBuf::from).any(|p| p.exists()) {
                     let mut grub_config = if let Some(ref gc) = config.grub {
                         gc.clone()
                     } else {
@@ -331,7 +331,7 @@ fn handle_request(
                     };
                     grub_config.webhook_id = pair_req.webhook_id.clone();
 
-                    if let Err(err) = crate::wizard::install_grub_hook(&config, &grub_config, Some(&pair_req.ha_grub_url)) {
+                    if let Err(err) = crate::wizard::install_grub_hook(&config, &grub_config, Some(&pair_req.ha_grub_url), pair_req.update_grub) {
                         error!("Failed to apply GRUB configuration: {}", err);
                         send_json(request, 500, json!({
                             "error": format!("Failed to apply GRUB configuration: {}", err)
@@ -594,6 +594,10 @@ mod tests {
     #[test]
     fn test_pairing_endpoint() -> Result<()> {
         let dir = tempdir()?;
+        let temp_hook_path = dir.path().join("99_grubstation");
+        unsafe {
+            std::env::set_var("GRUBSTATION_HOOK_PATH", temp_hook_path.to_str().unwrap());
+        }
         let grub_path = dir.path().join("grub.cfg");
         let mut grub_file = File::create(&grub_path)?;
         writeln!(grub_file, "menuentry 'Ubuntu' {{")?;
@@ -687,7 +691,7 @@ mod tests {
             "api_key": "test-api-key",
             "ha_daemon_url": format!("http://127.0.0.1:{}", ha_port),
             "ha_grub_url": "http://127.0.0.1/grub",
-            "apply_config": false,
+            "update_grub": false,
         });
 
         let res = ureq::post(&format!("http://127.0.0.1:{}/pair", daemon_port))
@@ -720,6 +724,10 @@ mod tests {
     #[test]
     fn test_pairing_endpoint_with_setup_pin() -> Result<()> {
         let dir = tempdir()?;
+        let temp_hook_path = dir.path().join("99_grubstation");
+        unsafe {
+            std::env::set_var("GRUBSTATION_HOOK_PATH", temp_hook_path.to_str().unwrap());
+        }
         let grub_path = dir.path().join("grub.cfg");
         let mut grub_file = File::create(&grub_path)?;
         writeln!(grub_file, "menuentry 'Ubuntu' {{")?;
@@ -796,7 +804,7 @@ mod tests {
             "api_key": "test-api-key",
             "ha_daemon_url": format!("http://127.0.0.1:{}", ha_port),
             "ha_grub_url": "http://127.0.0.1/grub",
-            "apply_config": false,
+            "update_grub": false,
         });
 
         // 1. Attempt to pair with no auth token (should fail with 401)

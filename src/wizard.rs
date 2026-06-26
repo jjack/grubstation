@@ -293,6 +293,11 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
     }
     std::fs::write(config_path, yaml)?;
 
+    // Validate the generated config
+    if let Err(e) = crate::config::load_config(config_path) {
+        anyhow::bail!("Generated config failed validation: {}", e);
+    }
+
     // Save initial state.json containing setup_pin and paired: false
     let state_path = config_path.parent().unwrap_or(Path::new(".")).join("state.json");
     let state_data = serde_json::json!({
@@ -310,7 +315,7 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
 
     if let Some(ref grub_config) = config.grub {
         if !grub_config.webhook_id.is_empty() {
-            install_grub_hook(&config, grub_config, None)?;
+            install_grub_hook(&config, grub_config, None, true)?;
         }
     }
 
@@ -374,11 +379,21 @@ pub fn install_grub_hook_to_path(
     Ok(())
 }
 
-pub fn install_grub_hook(config: &crate::config::Config, grub_config: &crate::config::GrubConfig, ha_grub_url: Option<&str>) -> Result<()> {
-    install_grub_hook_to_path(config, grub_config, Path::new("/etc/grub.d/99_grubstation"), ha_grub_url)?;
+pub fn install_grub_hook(
+    config: &crate::config::Config,
+    grub_config: &crate::config::GrubConfig,
+    ha_grub_url: Option<&str>,
+    run_update_grub: bool,
+) -> Result<()> {
+    let hook_path_str = std::env::var("GRUBSTATION_HOOK_PATH")
+        .unwrap_or_else(|_| "/etc/grub.d/99_grubstation".to_string());
+    let hook_path = Path::new(&hook_path_str);
 
-    #[cfg(target_os = "linux")]
-    {
+    install_grub_hook_to_path(config, grub_config, hook_path, ha_grub_url)?;
+
+    if run_update_grub {
+        #[cfg(target_os = "linux")]
+        {
         log::info!("Running update-grub to apply GRUB configuration changes...");
         
         let run_cmd = |cmd: &str, args: &[&str]| -> std::io::Result<std::process::ExitStatus> {
@@ -422,6 +437,7 @@ pub fn install_grub_hook(config: &crate::config::Config, grub_config: &crate::co
                 log::warn!("Neither update-grub nor grub-mkconfig/grub2-mkconfig was found in PATH. Skipping GRUB configuration update.");
             }
         }
+    }
     }
 
     Ok(())
