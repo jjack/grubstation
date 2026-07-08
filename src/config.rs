@@ -76,10 +76,11 @@ fn default_network_wait() -> u32 {
 }
 
 fn validate_ipv4(address: &str) -> Result<(), validator::ValidationError> {
-    match IpAddr::from_str(address) {
-        Ok(IpAddr::V4(_)) => Ok(()),
-        _ => Err(validator::ValidationError::new("invalid_ipv4")),
-    }
+    if address.parse::<std::net::Ipv4Addr>().is_ok() {                                                                                                                                                
+        Ok(())                                                                                                                                                                                        
+    } else {                                                                                                                                                                                          
+        Err(validator::ValidationError::new("invalid_ipv4"))                                                                                                                                          
+    }  
 }
 
 fn validate_file_exists(path: &Path) -> Result<(), validator::ValidationError> {
