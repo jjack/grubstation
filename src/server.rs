@@ -23,6 +23,18 @@ struct DaemonState {
     setup_pin: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedState {
+    #[serde(default)]
+    paired: bool,
+    token: Option<String>,
+    setup_pin: Option<String>,
+    webhook_id: Option<String>,
+    api_key: Option<String>,
+    ha_daemon_url: Option<String>,
+    ha_grub_url: Option<String>,
+}
+
 pub fn start_server(
     config: &crate::config::Config,
     config_path: PathBuf,
@@ -47,13 +59,13 @@ pub fn start_server(
 
     if state_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&state_path) {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                initial_paired = val["paired"].as_bool().unwrap_or(false);
-                initial_token = val["token"].as_str().map(|s| s.to_string());
-                initial_setup_pin = val["setup_pin"].as_str().map(|s| s.to_string());
-                webhook_id = val["webhook_id"].as_str().map(|s| s.to_string());
-                api_key = val["api_key"].as_str().map(|s| s.to_string());
-                ha_daemon_url = val["ha_daemon_url"].as_str().map(|s| s.to_string());
+            if let Ok(state) = serde_json::from_str::<PersistedState>(&content) {
+                initial_paired = state.paired;
+                initial_token = state.token;
+                initial_setup_pin = state.setup_pin;
+                webhook_id = state.webhook_id;
+                api_key = state.api_key;
+                ha_daemon_url = state.ha_daemon_url;
             }
         }
     }
@@ -383,14 +395,15 @@ fn handle_request(
                 }
 
                 // Save pairing state and request data to state.json
-                let state_file_data = serde_json::json!({
-                    "paired": true,
-                    "token": token,
-                    "webhook_id": pair_req.webhook_id,
-                    "api_key": pair_req.api_key,
-                    "ha_daemon_url": pair_req.ha_daemon_url,
-                    "ha_grub_url": pair_req.ha_grub_url,
-                });
+                let state_file_data = PersistedState {
+                    paired: true,
+                    token: Some(token.clone()),
+                    setup_pin: None,
+                    webhook_id: Some(pair_req.webhook_id.clone()),
+                    api_key: Some(pair_req.api_key.clone()),
+                    ha_daemon_url: Some(pair_req.ha_daemon_url.clone()),
+                    ha_grub_url: Some(pair_req.ha_grub_url.clone()),
+                };
 
                 if let Ok(json_str) = serde_json::to_string_pretty(&state_file_data) {
                     info!("Saving pairing state to {:?}", state_path);
@@ -634,10 +647,15 @@ mod tests {
 
         // Write mock state.json containing setup_pin and paired: false
         let state_path = config_path.parent().unwrap_or(Path::new(".")).join("state.json");
-        let state_data = serde_json::json!({
-            "paired": false,
-            "setup_pin": "test-setup-pin",
-        });
+        let state_data = PersistedState {
+            paired: false,
+            token: None,
+            setup_pin: Some("test-setup-pin".to_string()),
+            webhook_id: None,
+            api_key: None,
+            ha_daemon_url: None,
+            ha_grub_url: None,
+        };
         std::fs::write(&state_path, serde_json::to_string_pretty(&state_data)?)?;
 
         // We bind to ephemeral port (0) for daemon and mock HA
@@ -790,10 +808,15 @@ mod tests {
 
         // Write mock state.json containing setup_pin and paired: false
         let state_path = config_path.parent().unwrap_or(Path::new(".")).join("state.json");
-        let state_data = serde_json::json!({
-            "paired": false,
-            "setup_pin": "654321",
-        });
+        let state_data = PersistedState {
+            paired: false,
+            token: None,
+            setup_pin: Some("654321".to_string()),
+            webhook_id: None,
+            api_key: None,
+            ha_daemon_url: None,
+            ha_grub_url: None,
+        };
         std::fs::write(&state_path, serde_json::to_string_pretty(&state_data)?)?;
 
         // Start mock HA webhook server
