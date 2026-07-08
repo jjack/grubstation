@@ -17,6 +17,14 @@ pub struct PairRequest {
     pub update_grub: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct UpdateRequest {
+    ha_daemon_url: Option<String>,
+    ha_grub_url: Option<String>,
+    #[serde(default)]
+    update_grub: bool,
+}
+
 struct DaemonState {
     paired: bool,
     token: Option<String>,
@@ -512,6 +520,129 @@ fn handle_unpair(
     Ok(())
 }
 
+fn handle_update(
+    mut request: Request,
+    state: Arc<Mutex<DaemonState>>,
+    mac: String,
+    config: crate::config::Config,
+    config_path: PathBuf,
+) -> Result<()> {
+    let state_path = config_path.parent().unwrap_or(Path::new(".")).join("state.json");
+
+    // Authenticate with the pairing token
+    let provided_token = get_bearer_token(&request);
+    let is_authorized = {
+        let s = state.lock().unwrap();
+        s.paired && provided_token.is_some() && s.token.as_ref() == provided_token.as_ref()
+    };
+    if !is_authorized {
+        warn!("Unauthorized /update attempt from {:?}", request.remote_addr());
+        send_json_response(request, 401, json!({ "error": "Unauthorized" }))?;
+        return Ok(());
+    }
+
+    // Parse request body
+    let mut content = String::new();
+    if let Err(e) = request.as_reader().read_to_string(&mut content) {
+        send_json_response(request, 400, json!({
+            "error": format!("Failed to read request body: {}", e)
+        }))?;
+        return Ok(());
+    }
+    let update_req: UpdateRequest = match serde_json::from_str(&content) {
+        Ok(r) => r,
+        Err(e) => {
+            send_json_response(request, 400, json!({
+                "error": format!("Invalid JSON payload: {}", e)
+            }))?;
+            return Ok(());
+        }
+    };
+
+    // Load current state.json and apply the updates
+    let current = match std::fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<PersistedState>(&s).ok())
+    {
+        Some(s) => s,
+        None => {
+            send_json_response(request, 500, json!({ "error": "Failed to read state" }))?;
+            return Ok(());
+        }
+    };
+
+    let new_ha_daemon_url = update_req.ha_daemon_url
+        .unwrap_or_else(|| current.ha_daemon_url.clone().unwrap_or_default());
+    let new_ha_grub_url = update_req.ha_grub_url
+        .unwrap_or_else(|| current.ha_grub_url.clone().unwrap_or_default());
+
+    info!(
+        "/update: ha_daemon_url={:?} ha_grub_url={:?} update_grub={}",
+        new_ha_daemon_url, new_ha_grub_url, update_req.update_grub
+    );
+
+    // Optionally re-run the GRUB hook with the new URL
+    if update_req.update_grub {
+        if let Some(ref grub_config) = config.grub {
+            if let Err(e) = crate::wizard::install_grub_hook(
+                &config,
+                grub_config,
+                Some(&new_ha_grub_url),
+                true,
+            ) {
+                error!("Failed to apply GRUB configuration during /update: {}", e);
+                send_json_response(request, 500, json!({
+                    "error": format!("Failed to apply GRUB configuration: {}", e)
+                }))?;
+                return Ok(());
+            }
+        }
+    }
+
+    // Persist the updated state
+    let updated = PersistedState {
+        ha_daemon_url: Some(new_ha_daemon_url.clone()),
+        ha_grub_url: Some(new_ha_grub_url.clone()),
+        ..current
+    };
+    if let Ok(json_str) = serde_json::to_string_pretty(&updated) {
+        let _ = std::fs::write(&state_path, json_str);
+    }
+
+    send_json_response(request, 200, json!({ "success": true }))?;
+    info!("/update: state persisted successfully.");
+
+    // Trigger a re-sync to the new URL in the background
+    if let (Some(webhook_id), Some(api_key)) = (updated.webhook_id, updated.api_key) {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            info!("/update: triggering re-sync to new HA URL...");
+            let entries = if let Some(ref gc) = config.grub {
+                crate::grub::parse_grub_entries(&gc.path).unwrap_or_default()
+            } else {
+                crate::config::DEFAULT_GRUB_PATHS
+                    .iter()
+                    .map(std::path::PathBuf::from)
+                    .find(|p| p.exists())
+                    .and_then(|p| crate::grub::parse_grub_entries(&p).ok())
+                    .unwrap_or_default()
+            };
+            match crate::client::push_boot_options(
+                &new_ha_daemon_url,
+                &webhook_id,
+                &api_key,
+                &mac,
+                &entries,
+            ) {
+                Ok(()) => info!("/update: re-sync successful."),
+                Err(e) => error!("/update: re-sync failed: {}", e),
+            }
+        });
+    }
+
+    Ok(())
+}
+
 fn handle_shutdown(
     mut request: Request,
     state: Arc<Mutex<DaemonState>>,
@@ -573,6 +704,13 @@ fn handle_request(
             config,
             config_path,
             is_temp,
+        )?,
+        ("POST", "/update") => handle_update(
+            request,
+            state,
+            mac,
+            config,
+            config_path,
         )?,
         ("POST", "/unpair") => handle_unpair(
             request,
