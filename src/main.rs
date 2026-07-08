@@ -42,6 +42,8 @@ enum Commands {
         #[arg(long)]
         payload: Option<String>,
     },
+    /// Re-generates the setup PIN and resets the paired state, allowing Home Assistant to re-pair.
+    ResetPin,
 }
 
 fn main() -> Result<()> {
@@ -186,6 +188,35 @@ fn main() -> Result<()> {
         }
         Commands::Sync { dry_run } => {
             run_sync(&config_path, *dry_run)?;
+        }
+        Commands::ResetPin => {
+            let state_path = config_path.parent().unwrap_or(std::path::Path::new(".")).join("state.json");
+
+            // Load existing state so we preserve webhook/api_key/url fields
+            let mut state_val: serde_json::Value = if state_path.exists() {
+                let content = std::fs::read_to_string(&state_path)
+                    .map_err(|e| anyhow::anyhow!("Failed to read state.json: {}", e))?;
+                serde_json::from_str(&content)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse state.json: {}", e))?
+            } else {
+                serde_json::json!({})
+            };
+
+            let new_pin = format!("{:06}", fastrand::u32(0..1_000_000));
+
+            // Reset pairing state and install the fresh PIN
+            let obj = state_val.as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("state.json is not a JSON object"))?;
+            obj.insert("paired".to_string(), serde_json::Value::Bool(false));
+            obj.insert("token".to_string(), serde_json::Value::Null);
+            obj.insert("setup_pin".to_string(), serde_json::Value::String(new_pin.clone()));
+
+            let json_str = serde_json::to_string_pretty(&state_val)?;
+            std::fs::write(&state_path, json_str)
+                .map_err(|e| anyhow::anyhow!("Failed to write state.json: {}", e))?;
+
+            println!("Pairing state reset. New setup PIN: \x1b[1m{}\x1b[0m", new_pin);
+            println!("You can now trigger re-authentication from Home Assistant.");
         }
     }
 
