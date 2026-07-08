@@ -281,6 +281,7 @@ pub fn run_sync(config_path: &std::path::Path, dry_run: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::StatusCode;
     use tempfile::tempdir;
     use std::fs::File;
     use std::io::Write;
