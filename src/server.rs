@@ -263,14 +263,16 @@ fn handle_request(
                     "error": "Already paired"
                 }))?;
             } else {
-                if let Some(ref pin) = s.setup_pin {
-                    let provided_token = get_bearer_token(&request);
-                    if provided_token.is_none() || provided_token.as_ref() != Some(pin) {
-                        send_json(request, 401, json!({
-                            "error": "Unauthorized"
-                        }))?;
-                        return Ok(());
-                    }
+                let provided_token = get_bearer_token(&request);
+                let pin_matched = match (&s.setup_pin, &provided_token) {
+                    (Some(setup_pin), Some(token)) => setup_pin == token,
+                    _ => false,
+                };
+                if !pin_matched {
+                    send_json(request, 401, json!({
+                        "error": "invalid_pin"
+                    }))?;
+                    return Ok(());
                 }
 
                 let mut content = String::new();
@@ -630,6 +632,14 @@ mod tests {
 
         let config_path = dir.path().join("config.yaml");
 
+        // Write mock state.json containing setup_pin and paired: false
+        let state_path = config_path.parent().unwrap_or(Path::new(".")).join("state.json");
+        let state_data = serde_json::json!({
+            "paired": false,
+            "setup_pin": "test-setup-pin",
+        });
+        std::fs::write(&state_path, serde_json::to_string_pretty(&state_data)?)?;
+
         // We bind to ephemeral port (0) for daemon and mock HA
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let daemon_port = listener.local_addr()?.port();
@@ -713,6 +723,7 @@ mod tests {
         });
 
         let res = ureq::post(&format!("http://127.0.0.1:{}/pair", daemon_port))
+            .set("Authorization", "Bearer test-setup-pin")
             .send_json(pair_payload)?;
 
         assert_eq!(res.status(), 200);
