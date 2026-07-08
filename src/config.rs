@@ -3,8 +3,6 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use validator::Validate;
-use std::str::FromStr;
-use std::net::IpAddr;
 use network_interface::NetworkInterfaceConfig;
 
 pub const DEFAULT_BROADCAST_ADDRESS: &str = "255.255.255.255";

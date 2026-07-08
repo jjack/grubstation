@@ -213,8 +213,343 @@ pub fn start_server(
     Ok(())
 }
 
-fn handle_request(
+fn send_json_response(req: Request, status: u32, body: serde_json::Value) -> Result<()> {
+    let json_str = serde_json::to_string(&body)?;
+    let response = Response::from_string(json_str)
+        .with_status_code(status as i32)
+        .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+    req.respond(response)?;
+    Ok(())
+}
+
+fn get_bearer_token(req: &Request) -> Option<String> {
+    for header in req.headers() {
+        let field_str = std::str::from_utf8(header.field.as_str().as_bytes()).unwrap_or("");
+        if field_str.eq_ignore_ascii_case("authorization") {
+            let val = std::str::from_utf8(header.value.as_str().as_bytes()).unwrap_or("");
+            if val.to_lowercase().starts_with("bearer ") {
+                return Some(val[7..].trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn handle_status(request: Request, state: &Arc<Mutex<DaemonState>>) -> Result<()> {
+    let (paired, token_exists) = {
+        let s = state.lock().unwrap();
+        (s.paired, s.token.is_some())
+    };
+    let response_body = json!({
+        "paired": paired,
+        "token_configured": token_exists,
+        "os": get_os_name(),
+        "version": env!("CARGO_PKG_VERSION")
+    });
+    debug!("Status response: {}", response_body);
+    send_json_response(request, 200, response_body)?;
+    Ok(())
+}
+
+fn handle_pair(
     mut request: Request,
+    state: Arc<Mutex<DaemonState>>,
+    mdns: Arc<ServiceDaemon>,
+    current_service_info: Arc<Mutex<ServiceInfo>>,
+    mac: String,
+    address: String,
+    config: crate::config::Config,
+    config_path: PathBuf,
+    is_temp: bool,
+) -> Result<()> {
+    let state_path = config_path.parent().unwrap_or(Path::new(".")).join("state.json");
+    let mut s = state.lock().unwrap();
+    if s.paired {
+        send_json_response(request, 409, json!({
+            "error": "Already paired"
+        }))?;
+    } else {
+        let provided_token = get_bearer_token(&request);
+        let pin_matched = match (&s.setup_pin, &provided_token) {
+            (Some(setup_pin), Some(token)) => setup_pin == token,
+            _ => false,
+        };
+        if !pin_matched {
+            send_json_response(request, 401, json!({
+                "error": "invalid_pin"
+            }))?;
+            return Ok(());
+        }
+
+        let mut content = String::new();
+        if let Err(e) = request.as_reader().read_to_string(&mut content) {
+            send_json_response(request, 400, json!({
+                "error": format!("Failed to read request body: {}", e)
+            }))?;
+            return Ok(());
+        }
+
+        debug!("Received /pair payload: {}", content);
+
+        let pair_req: PairRequest = match serde_json::from_str(&content) {
+            Ok(req) => req,
+            Err(e) => {
+                error!("Invalid JSON payload: {}", e);
+                send_json_response(request, 400, json!({
+                    "error": format!("Invalid JSON payload: {}", e)
+                }))?;
+                return Ok(());
+            }
+        };
+
+        // Extract/parse the host's current GRUB entries
+        let entries = match (|| -> Result<Vec<String>> {
+            if let Some(ref gc) = config.grub {
+                Ok(crate::grub::parse_grub_entries(&gc.path)?)
+            } else {
+                if let Some(path) = crate::config::DEFAULT_GRUB_PATHS.iter().map(PathBuf::from).find(|p| p.exists()) {
+                    Ok(crate::grub::parse_grub_entries(&path)?)
+                } else {
+                    anyhow::bail!("No GRUB configuration file found at default paths.")
+                }
+            }
+        })() {
+            Ok(e) => e,
+            Err(err) => {
+                error!("Failed to parse GRUB entries: {}", err);
+                send_json_response(request, 500, json!({
+                    "error": format!("Failed to parse GRUB entries: {}", err)
+                }))?;
+                return Ok(());
+            }
+        };
+
+        // Always write/install the GRUB boot hook if GRUB is configured or defaults exist
+        if config.grub.is_some() || crate::config::DEFAULT_GRUB_PATHS.iter().map(PathBuf::from).any(|p| p.exists()) {
+            let mut grub_config = if let Some(ref gc) = config.grub {
+                gc.clone()
+            } else {
+                let path = crate::config::DEFAULT_GRUB_PATHS
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|p| p.exists())
+                    .unwrap_or_else(|| PathBuf::from("/boot/grub/grub.cfg"));
+                crate::config::GrubConfig {
+                    path,
+                    network_wait: 10,
+                    webhook_id: pair_req.webhook_id.clone(),
+                }
+            };
+            grub_config.webhook_id = pair_req.webhook_id.clone();
+
+            if let Err(err) = crate::wizard::install_grub_hook(&config, &grub_config, Some(&pair_req.ha_grub_url), pair_req.update_grub) {
+                error!("Failed to apply GRUB configuration: {}", err);
+                send_json_response(request, 500, json!({
+                    "error": format!("Failed to apply GRUB configuration: {}", err)
+                }))?;
+                return Ok(());
+            }
+        }
+
+        // Generate a random token
+        let token = generate_token();
+        s.paired = true;
+        s.token = Some(token.clone());
+        s.setup_pin = None;
+
+        // Update mDNS advertisement
+        let mut info = current_service_info.lock().unwrap();
+        let fullname = info.get_fullname().to_string();
+        let _ = mdns.unregister(&fullname);
+
+        // Create new ServiceInfo with paired=true
+        let service_type = "_grubstation._tcp.local.";
+        let instance_name = address.clone();
+        let system_hostname = hostname::get().unwrap().to_string_lossy().into_owned();
+        let host_name = format!("{}.local.", system_hostname);
+        let port = info.get_port();
+
+        let mut properties = std::collections::HashMap::new();
+        properties.insert("mac".to_string(), mac.clone());
+        properties.insert("paired".to_string(), "true".to_string());
+
+        if let Ok(new_info) = mdns_sd::ServiceInfo::new(
+            service_type,
+            &instance_name,
+            &host_name,
+            "",
+            port,
+            Some(properties),
+        ) {
+            let new_info = new_info.enable_addr_auto();
+            if let Ok(()) = mdns.register(new_info.clone()) {
+                *info = new_info;
+            }
+        }
+
+        // Save pairing state and request data to state.json
+        let state_file_data = PersistedState {
+            paired: true,
+            token: Some(token.clone()),
+            setup_pin: None,
+            webhook_id: Some(pair_req.webhook_id.clone()),
+            api_key: Some(pair_req.api_key.clone()),
+            ha_daemon_url: Some(pair_req.ha_daemon_url.clone()),
+            ha_grub_url: Some(pair_req.ha_grub_url.clone()),
+        };
+
+        if let Ok(json_str) = serde_json::to_string_pretty(&state_file_data) {
+            info!("Saving pairing state to {:?}", state_path);
+            let _ = std::fs::write(&state_path, json_str);
+        }
+
+        send_json_response(request, 200, json!({
+            "success": true,
+            "token": token
+        }))?;
+
+        info!("Pairing request handled successfully.");
+
+        // Spawn background thread to perform initial sync of boot options after responding
+        let ha_daemon_url = pair_req.ha_daemon_url.clone();
+        let webhook_id = pair_req.webhook_id.clone();
+        let api_key = pair_req.api_key.clone();
+        let mac = mac.clone();
+        std::thread::spawn(move || {
+            // Sleep 500ms to let Home Assistant register the webhook endpoint
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            info!("Performing initial sync of boot options to Home Assistant...");
+            match crate::client::push_boot_options(
+                &ha_daemon_url,
+                &webhook_id,
+                &api_key,
+                &mac,
+                &entries,
+            ) {
+                Ok(()) => {
+                    info!("Initial boot options sync successful!");
+                }
+                Err(err) => {
+                    error!("Initial boot options sync failed: {}", err);
+                }
+            }
+        });
+
+        if is_temp {
+            info!("Pairing completed in temporary server. Shutting down pairing server in 3 seconds to allow initial sync to complete...");
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                std::process::exit(0);
+            });
+        }
+    }
+    Ok(())
+}
+
+fn handle_unpair(
+    mut request: Request,
+    state: Arc<Mutex<DaemonState>>,
+    mdns: Arc<ServiceDaemon>,
+    current_service_info: Arc<Mutex<ServiceInfo>>,
+    mac: String,
+    address: String,
+    config_path: PathBuf,
+) -> Result<()> {
+    let state_path = config_path.parent().unwrap_or(Path::new(".")).join("state.json");
+    let provided_token = get_bearer_token(&request);
+    let mut content = String::new();
+    let _ = request.as_reader().read_to_string(&mut content);
+    info!("Received /unpair request. Token: {:?}, Payload: {}", provided_token, content);
+    let mut s = state.lock().unwrap();
+    
+    if !s.paired {
+        send_json_response(request, 400, json!({
+            "error": "Not paired"
+        }))?;
+    } else if provided_token.is_none() || s.token.as_ref() != provided_token.as_ref() {
+        send_json_response(request, 401, json!({
+            "error": "Unauthorized"
+        }))?;
+    } else {
+        s.paired = false;
+        s.token = None;
+
+        // Update mDNS advertisement
+        let mut info = current_service_info.lock().unwrap();
+        let fullname = info.get_fullname().to_string();
+        let _ = mdns.unregister(&fullname);
+
+        // Create new ServiceInfo with paired=false
+        let service_type = "_grubstation._tcp.local.";
+        let instance_name = address.clone();
+        let system_hostname = hostname::get().unwrap().to_string_lossy().into_owned();
+        let host_name = format!("{}.local.", system_hostname);
+        let port = info.get_port();
+
+        let mut properties = std::collections::HashMap::new();
+        properties.insert("mac".to_string(), mac.clone());
+        properties.insert("paired".to_string(), "false".to_string());
+
+        if let Ok(new_info) = mdns_sd::ServiceInfo::new(
+            service_type,
+            &instance_name,
+            &host_name,
+            "",
+            port,
+            Some(properties),
+        ) {
+            let new_info = new_info.enable_addr_auto();
+            if let Ok(()) = mdns.register(new_info.clone()) {
+                *info = new_info;
+            }
+        }
+
+        // Delete state.json
+        let _ = std::fs::remove_file(&state_path);
+
+        send_json_response(request, 200, json!({
+            "success": true
+        }))?;
+    }
+    Ok(())
+}
+
+fn handle_shutdown(
+    mut request: Request,
+    state: Arc<Mutex<DaemonState>>,
+) -> Result<()> {
+    let provided_token = get_bearer_token(&request);
+    let mut content = String::new();
+    let _ = request.as_reader().read_to_string(&mut content);
+    info!("Received /shutdown request. Token: {:?}, Payload: {}", provided_token, content);
+    let is_authorized = {
+        let s = state.lock().unwrap();
+        s.paired && provided_token.is_some() && s.token.as_ref() == provided_token.as_ref()
+    };
+
+    if !is_authorized {
+        send_json_response(request, 401, json!({
+            "error": "Unauthorized"
+        }))?;
+    } else {
+        send_json_response(request, 200, json!({
+            "success": true,
+            "message": "Shutting down..."
+        }))?;
+
+        // Trigger shutdown asynchronously after a short sleep to allow TCP flush
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if let Err(e) = trigger_shutdown() {
+                error!("Failed to shut down system: {}", e);
+            }
+        });
+    }
+    Ok(())
+}
+
+fn handle_request(
+    request: Request,
     state: Arc<Mutex<DaemonState>>,
     mdns: Arc<ServiceDaemon>,
     current_service_info: Arc<Mutex<ServiceInfo>>,
@@ -227,318 +562,31 @@ fn handle_request(
     let method = request.method().as_str();
     let url = request.url();
 
-    let state_path = config_path.parent().unwrap_or(Path::new(".")).join("state.json");
-
-    // Helper to send JSON responses
-    let send_json = |req: Request, status: u32, body: serde_json::Value| -> Result<()> {
-        let json_str = serde_json::to_string(&body)?;
-        let response = Response::from_string(json_str)
-            .with_status_code(status as i32)
-            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
-        req.respond(response)?;
-        Ok(())
-    };
-
-    // Extract Bearer token from Authorization header
-    let get_bearer_token = |req: &Request| -> Option<String> {
-        for header in req.headers() {
-            let field_str = std::str::from_utf8(header.field.as_str().as_bytes()).unwrap_or("");
-            if field_str.eq_ignore_ascii_case("authorization") {
-                let val = std::str::from_utf8(header.value.as_str().as_bytes()).unwrap_or("");
-                if val.to_lowercase().starts_with("bearer ") {
-                    return Some(val[7..].trim().to_string());
-                }
-            }
-        }
-        None
-    };
-
     match (method, url) {
-        ("GET", "/status") => {
-            let (paired, token_exists) = {
-                let s = state.lock().unwrap();
-                (s.paired, s.token.is_some())
-            };
-            let response_body = json!({
-                "paired": paired,
-                "token_configured": token_exists,
-                "os": get_os_name(),
-                "version": env!("CARGO_PKG_VERSION")
-            });
-            debug!("Status response: {}", response_body);
-            send_json(request, 200, response_body)?;
-        }
-        ("POST", "/pair") => {
-            let mut s = state.lock().unwrap();
-            if s.paired {
-                send_json(request, 409, json!({
-                    "error": "Already paired"
-                }))?;
-            } else {
-                let provided_token = get_bearer_token(&request);
-                let pin_matched = match (&s.setup_pin, &provided_token) {
-                    (Some(setup_pin), Some(token)) => setup_pin == token,
-                    _ => false,
-                };
-                if !pin_matched {
-                    send_json(request, 401, json!({
-                        "error": "invalid_pin"
-                    }))?;
-                    return Ok(());
-                }
-
-                let mut content = String::new();
-                if let Err(e) = request.as_reader().read_to_string(&mut content) {
-                    send_json(request, 400, json!({
-                        "error": format!("Failed to read request body: {}", e)
-                    }))?;
-                    return Ok(());
-                }
-
-                debug!("Received /pair payload: {}", content);
-
-                let pair_req: PairRequest = match serde_json::from_str(&content) {
-                    Ok(req) => req,
-                    Err(e) => {
-                        error!("Invalid JSON payload: {}", e);
-                        send_json(request, 400, json!({
-                            "error": format!("Invalid JSON payload: {}", e)
-                        }))?;
-                        return Ok(());
-                    }
-                };
-
-                // Extract/parse the host's current GRUB entries
-                let entries = match (|| -> Result<Vec<String>> {
-                    if let Some(ref gc) = config.grub {
-                        Ok(crate::grub::parse_grub_entries(&gc.path)?)
-                    } else {
-                        if let Some(path) = crate::config::DEFAULT_GRUB_PATHS.iter().map(PathBuf::from).find(|p| p.exists()) {
-                            Ok(crate::grub::parse_grub_entries(&path)?)
-                        } else {
-                            anyhow::bail!("No GRUB configuration file found at default paths.")
-                        }
-                    }
-                })() {
-                    Ok(e) => e,
-                    Err(err) => {
-                        error!("Failed to parse GRUB entries: {}", err);
-                        send_json(request, 500, json!({
-                            "error": format!("Failed to parse GRUB entries: {}", err)
-                        }))?;
-                        return Ok(());
-                    }
-                };
-
-
-                // Always write/install the GRUB boot hook if GRUB is configured or defaults exist
-                if config.grub.is_some() || crate::config::DEFAULT_GRUB_PATHS.iter().map(PathBuf::from).any(|p| p.exists()) {
-                    let mut grub_config = if let Some(ref gc) = config.grub {
-                        gc.clone()
-                    } else {
-                        let path = crate::config::DEFAULT_GRUB_PATHS
-                            .iter()
-                            .map(PathBuf::from)
-                            .find(|p| p.exists())
-                            .unwrap_or_else(|| PathBuf::from("/boot/grub/grub.cfg"));
-                        crate::config::GrubConfig {
-                            path,
-                            network_wait: 10,
-                            webhook_id: pair_req.webhook_id.clone(),
-                        }
-                    };
-                    grub_config.webhook_id = pair_req.webhook_id.clone();
-
-                    if let Err(err) = crate::wizard::install_grub_hook(&config, &grub_config, Some(&pair_req.ha_grub_url), pair_req.update_grub) {
-                        error!("Failed to apply GRUB configuration: {}", err);
-                        send_json(request, 500, json!({
-                            "error": format!("Failed to apply GRUB configuration: {}", err)
-                        }))?;
-                        return Ok(());
-                    }
-                }
-
-                // Generate a random token
-                let token = generate_token();
-                s.paired = true;
-                s.token = Some(token.clone());
-                s.setup_pin = None;
-
-                // Update mDNS advertisement
-                let mut info = current_service_info.lock().unwrap();
-                let fullname = info.get_fullname().to_string();
-                let _ = mdns.unregister(&fullname);
-
-                // Create new ServiceInfo with paired=true
-                let service_type = "_grubstation._tcp.local.";
-                let instance_name = address.clone();
-                let system_hostname = hostname::get().unwrap().to_string_lossy().into_owned();
-                let host_name = format!("{}.local.", system_hostname);
-                let port = info.get_port();
-
-                let mut properties = std::collections::HashMap::new();
-                properties.insert("mac".to_string(), mac.clone());
-                properties.insert("paired".to_string(), "true".to_string());
-
-                if let Ok(new_info) = mdns_sd::ServiceInfo::new(
-                    service_type,
-                    &instance_name,
-                    &host_name,
-                    "",
-                    port,
-                    Some(properties),
-                ) {
-                    let new_info = new_info.enable_addr_auto();
-                    if let Ok(()) = mdns.register(new_info.clone()) {
-                        *info = new_info;
-                    }
-                }
-
-                // Save pairing state and request data to state.json
-                let state_file_data = PersistedState {
-                    paired: true,
-                    token: Some(token.clone()),
-                    setup_pin: None,
-                    webhook_id: Some(pair_req.webhook_id.clone()),
-                    api_key: Some(pair_req.api_key.clone()),
-                    ha_daemon_url: Some(pair_req.ha_daemon_url.clone()),
-                    ha_grub_url: Some(pair_req.ha_grub_url.clone()),
-                };
-
-                if let Ok(json_str) = serde_json::to_string_pretty(&state_file_data) {
-                    info!("Saving pairing state to {:?}", state_path);
-                    let _ = std::fs::write(&state_path, json_str);
-                }
-
-                send_json(request, 200, json!({
-                    "success": true,
-                    "token": token
-                }))?;
-
-                info!("Pairing request handled successfully.");
-
-                // Spawn background thread to perform initial sync of boot options after responding
-                let ha_daemon_url = pair_req.ha_daemon_url.clone();
-                let webhook_id = pair_req.webhook_id.clone();
-                let api_key = pair_req.api_key.clone();
-                let mac = mac.clone();
-                std::thread::spawn(move || {
-                    // Sleep 500ms to let Home Assistant register the webhook endpoint
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    info!("Performing initial sync of boot options to Home Assistant...");
-                    match crate::client::push_boot_options(
-                        &ha_daemon_url,
-                        &webhook_id,
-                        &api_key,
-                        &mac,
-                        &entries,
-                    ) {
-                        Ok(()) => {
-                            info!("Initial boot options sync successful!");
-                        }
-                        Err(err) => {
-                            error!("Initial boot options sync failed: {}", err);
-                        }
-                    }
-                });
-
-                if is_temp {
-                    info!("Pairing completed in temporary server. Shutting down pairing server in 3 seconds to allow initial sync to complete...");
-                    std::thread::spawn(|| {
-                        std::thread::sleep(std::time::Duration::from_secs(3));
-                        std::process::exit(0);
-                    });
-                }
-            }
-        }
-        ("POST", "/unpair") => {
-            let provided_token = get_bearer_token(&request);
-            let mut content = String::new();
-            let _ = request.as_reader().read_to_string(&mut content);
-            info!("Received /unpair request. Token: {:?}, Payload: {}", provided_token, content);
-            let mut s = state.lock().unwrap();
-            
-            if !s.paired {
-                send_json(request, 400, json!({
-                    "error": "Not paired"
-                }))?;
-            } else if provided_token.is_none() || s.token.as_ref() != provided_token.as_ref() {
-                send_json(request, 401, json!({
-                    "error": "Unauthorized"
-                }))?;
-            } else {
-                s.paired = false;
-                s.token = None;
-
-                // Update mDNS advertisement
-                let mut info = current_service_info.lock().unwrap();
-                let fullname = info.get_fullname().to_string();
-                let _ = mdns.unregister(&fullname);
-
-                // Create new ServiceInfo with paired=false
-                let service_type = "_grubstation._tcp.local.";
-                let instance_name = address.clone();
-                let system_hostname = hostname::get().unwrap().to_string_lossy().into_owned();
-                let host_name = format!("{}.local.", system_hostname);
-                let port = info.get_port();
-
-                let mut properties = std::collections::HashMap::new();
-                properties.insert("mac".to_string(), mac.clone());
-                properties.insert("paired".to_string(), "false".to_string());
-
-                if let Ok(new_info) = mdns_sd::ServiceInfo::new(
-                    service_type,
-                    &instance_name,
-                    &host_name,
-                    "",
-                    port,
-                    Some(properties),
-                ) {
-                    let new_info = new_info.enable_addr_auto();
-                    if let Ok(()) = mdns.register(new_info.clone()) {
-                        *info = new_info;
-                    }
-                }
-
-                // Delete state.json
-                let _ = std::fs::remove_file(&state_path);
-
-                send_json(request, 200, json!({
-                    "success": true
-                }))?;
-            }
-        }
-        ("POST", "/shutdown") => {
-            let provided_token = get_bearer_token(&request);
-            let mut content = String::new();
-            let _ = request.as_reader().read_to_string(&mut content);
-            info!("Received /shutdown request. Token: {:?}, Payload: {}", provided_token, content);
-            let is_authorized = {
-                let s = state.lock().unwrap();
-                s.paired && provided_token.is_some() && s.token.as_ref() == provided_token.as_ref()
-            };
-
-            if !is_authorized {
-                send_json(request, 401, json!({
-                    "error": "Unauthorized"
-                }))?;
-            } else {
-                send_json(request, 200, json!({
-                    "success": true,
-                    "message": "Shutting down..."
-                }))?;
-
-                // Trigger shutdown asynchronously after a short sleep to allow TCP flush
-                std::thread::spawn(|| {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    if let Err(e) = trigger_shutdown() {
-                        error!("Failed to shut down system: {}", e);
-                    }
-                });
-            }
-        }
+        ("GET", "/status") => handle_status(request, &state)?,
+        ("POST", "/pair") => handle_pair(
+            request,
+            state,
+            mdns,
+            current_service_info,
+            mac,
+            address,
+            config,
+            config_path,
+            is_temp,
+        )?,
+        ("POST", "/unpair") => handle_unpair(
+            request,
+            state,
+            mdns,
+            current_service_info,
+            mac,
+            address,
+            config_path,
+        )?,
+        ("POST", "/shutdown") => handle_shutdown(request, state)?,
         _ => {
-            send_json(request, 404, json!({
+            send_json_response(request, 404, json!({
                 "error": "Not Found"
             }))?;
         }
