@@ -275,6 +275,7 @@ fn handle_pair(
             _ => false,
         };
         if !pin_matched {
+            warn!("Unauthorized /pair attempt from {:?}: invalid PIN", request.remote_addr());
             send_json_response(request, 401, json!({
                 "error": "invalid_pin"
             }))?;
@@ -467,6 +468,7 @@ fn handle_unpair(
             "error": "Not paired"
         }))?;
     } else if provided_token.is_none() || s.token.as_ref() != provided_token.as_ref() {
+        warn!("Unauthorized /unpair attempt from {:?}", request.remote_addr());
         send_json_response(request, 401, json!({
             "error": "Unauthorized"
         }))?;
@@ -528,6 +530,7 @@ fn handle_shutdown(
     };
 
     if !is_authorized {
+        warn!("Unauthorized /shutdown attempt from {:?}", request.remote_addr());
         send_json_response(request, 401, json!({
             "error": "Unauthorized"
         }))?;
