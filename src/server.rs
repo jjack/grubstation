@@ -234,13 +234,9 @@ fn get_bearer_token(req: &Request) -> Option<String> {
 }
 
 fn handle_status(request: Request, state: &Arc<Mutex<DaemonState>>) -> Result<()> {
-    let (paired, token_exists) = {
-        let s = state.lock().unwrap();
-        (s.paired, s.token.is_some())
-    };
+    let paired = state.lock().unwrap().paired;
     let response_body = json!({
         "paired": paired,
-        "token_configured": token_exists,
         "os": get_os_name(),
         "version": env!("CARGO_PKG_VERSION")
     });
