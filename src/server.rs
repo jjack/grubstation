@@ -247,10 +247,12 @@ fn handle_request(
                 let s = state.lock().unwrap();
                 (s.paired, s.token.is_some())
             };
-            send_json(request, 200, json!({
+            let response_body = json!({
                 "paired": paired,
                 "token_configured": token_exists
-            }))?;
+            });
+            debug!("Status response: {}", response_body);
+            send_json(request, 200, response_body)?;
         }
         ("POST", "/pair") => {
             let mut s = state.lock().unwrap();
