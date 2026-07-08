@@ -1,4 +1,5 @@
 use anyhow::Result;
+use http::StatusCode;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use log::{error, warn, info, debug};
@@ -219,10 +220,10 @@ pub fn start_server(
     Ok(())
 }
 
-fn send_json_response(req: Request, status: u32, body: serde_json::Value) -> Result<()> {
+fn send_json_response(req: Request, status: StatusCode, body: serde_json::Value) -> Result<()> {
     let json_str = serde_json::to_string(&body)?;
     let response = Response::from_string(json_str)
-        .with_status_code(status as i32)
+        .with_status_code(status.as_u16() as i32)
         .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
     req.respond(response)?;
     Ok(())
@@ -249,7 +250,7 @@ fn handle_status(request: Request, state: &Arc<Mutex<DaemonState>>) -> Result<()
         "version": env!("CARGO_PKG_VERSION")
     });
     debug!("Status response: {}", response_body);
-    send_json_response(request, 200, response_body)?;
+    send_json_response(request, StatusCode::OK, response_body)?;
     Ok(())
 }
 
@@ -275,13 +276,13 @@ fn handle_pair(
         if s.paired && s.setup_pin.is_none() {
             // Already paired and no PIN set — instruct caller to reset the PIN first
             warn!("Re-pair attempt from {:?} rejected: already paired and no setup PIN is set (run `grubstation reset-pin`)", request.remote_addr());
-            send_json_response(request, 409, json!({
+            send_json_response(request, StatusCode::CONFLICT, json!({
                 "error": "already_paired",
                 "hint": "Run `grubstation reset-pin` on the host to generate a new pairing PIN."
             }))?;
         } else {
             warn!("Unauthorized /pair attempt from {:?}: invalid PIN", request.remote_addr());
-            send_json_response(request, 401, json!({
+            send_json_response(request, StatusCode::UNAUTHORIZED, json!({
                 "error": "invalid_pin"
             }))?;
         }
@@ -290,7 +291,7 @@ fn handle_pair(
 
     let mut content = String::new();
     if let Err(e) = request.as_reader().read_to_string(&mut content) {
-        send_json_response(request, 400, json!({
+        send_json_response(request, StatusCode::BAD_REQUEST, json!({
             "error": format!("Failed to read request body: {}", e)
         }))?;
         return Ok(());
@@ -302,7 +303,7 @@ fn handle_pair(
         Ok(req) => req,
         Err(e) => {
             error!("Invalid JSON payload: {}", e);
-            send_json_response(request, 400, json!({
+            send_json_response(request, StatusCode::BAD_REQUEST, json!({
                 "error": format!("Invalid JSON payload: {}", e)
             }))?;
             return Ok(());
@@ -324,7 +325,7 @@ fn handle_pair(
         Ok(e) => e,
         Err(err) => {
             error!("Failed to parse GRUB entries: {}", err);
-            send_json_response(request, 500, json!({
+            send_json_response(request, StatusCode::INTERNAL_SERVER_ERROR, json!({
                 "error": format!("Failed to parse GRUB entries: {}", err)
             }))?;
             return Ok(());
@@ -351,7 +352,7 @@ fn handle_pair(
 
         if let Err(err) = crate::wizard::install_grub_hook(&config, &grub_config, Some(&pair_req.ha_grub_url), pair_req.update_grub) {
             error!("Failed to apply GRUB configuration: {}", err);
-            send_json_response(request, 500, json!({
+            send_json_response(request, StatusCode::INTERNAL_SERVER_ERROR, json!({
                 "error": format!("Failed to apply GRUB configuration: {}", err)
             }))?;
             return Ok(());
@@ -409,7 +410,7 @@ fn handle_pair(
         let _ = std::fs::write(&state_path, json_str);
     }
 
-    send_json_response(request, 200, json!({
+    send_json_response(request, StatusCode::OK, json!({
         "success": true,
         "token": token,
         "mac": mac
@@ -469,12 +470,12 @@ fn handle_unpair(
     let mut s = state.lock().unwrap();
     
     if !s.paired {
-        send_json_response(request, 400, json!({
+        send_json_response(request, StatusCode::BAD_REQUEST, json!({
             "error": "Not paired"
         }))?;
     } else if provided_token.is_none() || s.token.as_ref() != provided_token.as_ref() {
         warn!("Unauthorized /unpair attempt from {:?}", request.remote_addr());
-        send_json_response(request, 401, json!({
+        send_json_response(request, StatusCode::UNAUTHORIZED, json!({
             "error": "Unauthorized"
         }))?;
     } else {
@@ -513,7 +514,7 @@ fn handle_unpair(
         // Delete state.json
         let _ = std::fs::remove_file(&state_path);
 
-        send_json_response(request, 200, json!({
+        send_json_response(request, StatusCode::OK, json!({
             "success": true
         }))?;
     }
@@ -537,14 +538,14 @@ fn handle_update(
     };
     if !is_authorized {
         warn!("Unauthorized /update attempt from {:?}", request.remote_addr());
-        send_json_response(request, 401, json!({ "error": "Unauthorized" }))?;
+        send_json_response(request, StatusCode::UNAUTHORIZED, json!({ "error": "Unauthorized" }))?;
         return Ok(());
     }
 
     // Parse request body
     let mut content = String::new();
     if let Err(e) = request.as_reader().read_to_string(&mut content) {
-        send_json_response(request, 400, json!({
+        send_json_response(request, StatusCode::BAD_REQUEST, json!({
             "error": format!("Failed to read request body: {}", e)
         }))?;
         return Ok(());
@@ -552,7 +553,7 @@ fn handle_update(
     let update_req: UpdateRequest = match serde_json::from_str(&content) {
         Ok(r) => r,
         Err(e) => {
-            send_json_response(request, 400, json!({
+            send_json_response(request, StatusCode::BAD_REQUEST, json!({
                 "error": format!("Invalid JSON payload: {}", e)
             }))?;
             return Ok(());
@@ -566,7 +567,7 @@ fn handle_update(
     {
         Some(s) => s,
         None => {
-            send_json_response(request, 500, json!({ "error": "Failed to read state" }))?;
+            send_json_response(request, StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": "Failed to read state" }))?;
             return Ok(());
         }
     };
@@ -591,7 +592,7 @@ fn handle_update(
                 true,
             ) {
                 error!("Failed to apply GRUB configuration during /update: {}", e);
-                send_json_response(request, 500, json!({
+                send_json_response(request, StatusCode::INTERNAL_SERVER_ERROR, json!({
                     "error": format!("Failed to apply GRUB configuration: {}", e)
                 }))?;
                 return Ok(());
@@ -609,7 +610,7 @@ fn handle_update(
         let _ = std::fs::write(&state_path, json_str);
     }
 
-    send_json_response(request, 200, json!({ "success": true }))?;
+    send_json_response(request, StatusCode::OK, json!({ "success": true }))?;
     info!("/update: state persisted successfully.");
 
     // Trigger a re-sync to the new URL in the background
@@ -658,11 +659,11 @@ fn handle_shutdown(
 
     if !is_authorized {
         warn!("Unauthorized /shutdown attempt from {:?}", request.remote_addr());
-        send_json_response(request, 401, json!({
+        send_json_response(request, StatusCode::UNAUTHORIZED, json!({
             "error": "Unauthorized"
         }))?;
     } else {
-        send_json_response(request, 200, json!({
+        send_json_response(request, StatusCode::OK, json!({
             "success": true,
             "message": "Shutting down..."
         }))?;
@@ -723,7 +724,7 @@ fn handle_request(
         )?,
         ("POST", "/shutdown") => handle_shutdown(request, state)?,
         _ => {
-            send_json_response(request, 404, json!({
+            send_json_response(request, StatusCode::NOT_FOUND, json!({
                 "error": "Not Found"
             }))?;
         }
@@ -895,7 +896,7 @@ mod tests {
                 assert_eq!(options[1].as_str().unwrap(), "Advanced>Kernel 2");
 
                 let response = tiny_http::Response::from_string("{\"status\": \"ok\"}")
-                    .with_status_code(200);
+                    .with_status_code(StatusCode::OK.as_u16() as i32);
                 req.respond(response).unwrap();
             }
         });
@@ -929,7 +930,7 @@ mod tests {
             .set("Authorization", "Bearer test-setup-pin")
             .send_json(pair_payload)?;
 
-        assert_eq!(res.status(), 200);
+        assert_eq!(res.status(), StatusCode::OK.as_u16());
         let res_json: serde_json::Value = res.into_json()?;
         assert!(res_json["success"].as_bool().unwrap());
         let token = res_json["token"].as_str().unwrap();
@@ -1015,7 +1016,7 @@ mod tests {
             if let Some(req) = ha_server.incoming_requests().next() {
                 assert_eq!(req.url(), "/api/webhook/test-webhook-id");
                 let response = tiny_http::Response::from_string("{\"status\": \"ok\"}")
-                    .with_status_code(200);
+                    .with_status_code(StatusCode::OK.as_u16() as i32);
                 req.respond(response).unwrap();
             }
         });
@@ -1050,7 +1051,7 @@ mod tests {
             .send_json(pair_payload.clone());
         assert!(res_no_auth.is_err());
         if let Err(ureq::Error::Status(code, _)) = res_no_auth {
-            assert_eq!(code, 401);
+            assert_eq!(code, StatusCode::UNAUTHORIZED.as_u16());
         } else {
             panic!("Expected status error 401");
         }
@@ -1061,7 +1062,7 @@ mod tests {
             .send_json(pair_payload.clone());
         assert!(res_bad_auth.is_err());
         if let Err(ureq::Error::Status(code, _)) = res_bad_auth {
-            assert_eq!(code, 401);
+            assert_eq!(code, StatusCode::UNAUTHORIZED.as_u16());
         } else {
             panic!("Expected status error 401");
         }
@@ -1071,7 +1072,7 @@ mod tests {
             .set("Authorization", "Bearer 654321")
             .send_json(pair_payload)?;
 
-        assert_eq!(res.status(), 200);
+        assert_eq!(res.status(), StatusCode::OK.as_u16());
         let res_json: serde_json::Value = res.into_json()?;
         assert!(res_json["success"].as_bool().unwrap());
         assert!(res_json["mac"].as_str().is_some());

@@ -1,5 +1,6 @@
-use serde_json::json;
 use anyhow::Result;
+use http::StatusCode;
+use serde_json::json;
 
 pub fn build_boot_options_payload(mac: &str, entries: &[String]) -> serde_json::Value {
     json!({
@@ -49,7 +50,9 @@ pub fn push_boot_options(
         }
     };
 
-    if response.status() >= 200 && response.status() < 300 {
+    if StatusCode::from_u16(response.status())
+        .is_ok_and(|status| status.is_success())
+    {
         let body = response.into_string().unwrap_or_default();
         log::info!("HA Response body: {}", body);
         let trimmed = body.trim();

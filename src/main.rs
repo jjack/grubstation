@@ -361,7 +361,7 @@ mod tests {
                 assert_eq!(json_body["boot_options"].as_array().unwrap()[0].as_str().unwrap(), "Ubuntu");
 
                 let response = tiny_http::Response::from_string("{\"status\": \"ok\"}")
-                    .with_status_code(200);
+                    .with_status_code(StatusCode::OK.as_u16() as i32);
                 req.respond(response).unwrap();
             }
         });
@@ -435,7 +435,7 @@ mod tests {
                 assert_eq!(json_body["mac"], expected_mac);
 
                 let response = tiny_http::Response::from_string("{\"status\": \"ok\"}")
-                    .with_status_code(200);
+                    .with_status_code(StatusCode::OK.as_u16() as i32);
                 req.respond(response).unwrap();
             }
         });
