@@ -249,7 +249,9 @@ fn handle_request(
             };
             let response_body = json!({
                 "paired": paired,
-                "token_configured": token_exists
+                "token_configured": token_exists,
+                "os": get_os_name(),
+                "version": env!("CARGO_PKG_VERSION")
             });
             debug!("Status response: {}", response_body);
             send_json(request, 200, response_body)?;
@@ -584,6 +586,20 @@ fn trigger_shutdown() -> Result<()> {
         anyhow::bail!("All shutdown commands failed: {:?}", errs);
     }
     Ok(())
+}
+
+fn get_os_name() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
+            for line in content.lines() {
+                if let Some(stripped) = line.strip_prefix("PRETTY_NAME=") {
+                    return stripped.trim_matches('"').to_string();
+                }
+            }
+        }
+    }
+    std::env::consts::OS.to_string()
 }
 
 #[cfg(test)]
