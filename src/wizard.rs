@@ -302,9 +302,14 @@ pub fn install_grub_hook_to_path(
         .collect::<Vec<_>>()
         .join(" ");
 
+    // GRUB uses a device-like path syntax for HTTP networking requests,
+    // formatted as `(http,host)/path/to/resource`.
     let default_boot_url = format!("(http,{})/api/grubstation/{}?token={}", address, mac, grub_config.webhook_id);
     let boot_url = if let Some(url) = ha_grub_url {
+        // Strip the protocol prefix (e.g., http:// or https://)
         let url_without_proto = url.trim_start_matches("http://").trim_start_matches("https://");
+        
+        // Split into host (and port) vs. the request path at the first '/'
         if let Some(pos) = url_without_proto.find('/') {
             let host = &url_without_proto[..pos];
             let path = &url_without_proto[pos..];
