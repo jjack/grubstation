@@ -1,5 +1,5 @@
 use anyhow::Result;
-use cliclack::{confirm, input, intro, outro, select};
+use cliclack::{confirm, input, intro, outro, select, spinner};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use std::path::{Path, PathBuf};
 
@@ -49,7 +49,9 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
         anyhow::anyhow!("Permission check failed: Cannot write to config file at {:?}. Error: {}", config_path, e)
     })?;
 
-    intro("Grubstation Configuration Wizard")?;
+    intro("GrubStation Configuration Wizard")?;
+
+    cliclack::clear_screen().unwrap();
 
     if config_path.exists() {
         let should_overwrite = confirm(format!(
@@ -308,22 +310,38 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
         let _ = std::fs::write(&state_path, json_str);
     }
 
-    outro(format!(
-        "Configuration saved to {:?}. Success!\n\nSetup Pairing PIN: \x1b[1m{}\x1b[0m",
-        config_path, setup_pin
-    ))?;
+    cliclack::log::step(format!("Configuration saved to {:?}.",config_path))?;
+
+    if mode != InstallMode::ShutdownHookOnly {
+        cliclack::log::success(format!(
+            "Home Assistant Pairing PIN: \x1b[1m{}\x1b[0m",
+            setup_pin
+        ))?;
+    }
 
     if let Some(ref grub_config) = config.grub {
         if !grub_config.webhook_id.is_empty() {
             install_grub_hook(&config, grub_config, None, true)?;
         }
     }
-
     if mode == InstallMode::ShutdownHookOnly {
+        let s = spinner();
+        s.start("Registering grubstation shutdown hook...");
         crate::service::install_shutdown_hook(config_path)?;
+        s.stop("Grubstation shutdown hook registered.");
     } else if config.daemon.is_some() {
-        crate::service::install_and_start_service(config_path)?;
+        let s = spinner();
+        s.start("Installing grubstation service...");
+        crate::service::install_service(config_path)?;
+        s.stop("Grubstation service installed.");
+
+        let s = spinner();
+        s.start("Starting grubstation service...");
+        crate::service::start_service()?;
+        s.stop("Grubstation service started.");
     }
+
+    outro("GrubStation setup completed successfully!")?;
 
     Ok(false)
 }
@@ -520,4 +538,3 @@ mod tests {
         assert!(content.contains("for i in 1 2 3; do"));
     }
 }
-

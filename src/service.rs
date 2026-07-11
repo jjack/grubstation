@@ -1,9 +1,8 @@
 use anyhow::Result;
 use std::path::Path;
-use log::info;
 
 #[cfg(target_os = "linux")]
-pub fn install_and_start_service(config_path: &Path) -> Result<()> {
+pub fn install_service(config_path: &Path) -> Result<()> {
     let exe_path = std::env::current_exe()?;
     let abs_config_path = config_path.canonicalize()?;
 
@@ -34,8 +33,12 @@ pub fn install_and_start_service(config_path: &Path) -> Result<()> {
         anyhow::bail!("Failed to enable grubstation service");
     }
 
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub fn start_service() -> Result<()> {
     // Start service
-    info!("Starting grubstation service");
     let status = std::process::Command::new("systemctl")
         .arg("start")
         .arg("grubstation.service")
@@ -48,7 +51,7 @@ pub fn install_and_start_service(config_path: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-pub fn install_and_start_service(config_path: &Path) -> Result<()> {
+pub fn install_service(config_path: &Path) -> Result<()> {
     let exe_path = std::env::current_exe()?;
     let abs_config_path = config_path.canonicalize()?;
 
@@ -71,8 +74,12 @@ pub fn install_and_start_service(config_path: &Path) -> Result<()> {
         anyhow::bail!("Failed to create Windows service");
     }
 
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub fn start_service() -> Result<()> {
     // Run sc start
-    info!("Starting grubstation service");
     let status = std::process::Command::new("sc")
         .args(&["start", "grubstation"])
         .status()?;
@@ -84,8 +91,13 @@ pub fn install_and_start_service(config_path: &Path) -> Result<()> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-pub fn install_and_start_service(_config_path: &Path) -> Result<()> {
+pub fn install_service(_config_path: &Path) -> Result<()> {
     anyhow::bail!("Unsupported platform for service installation");
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+pub fn start_service() -> Result<()> {
+    anyhow::bail!("Unsupported platform for starting service");
 }
 
 #[cfg(target_os = "linux")]
@@ -118,7 +130,6 @@ pub fn install_shutdown_hook(config_path: &Path) -> Result<()> {
         anyhow::bail!("Failed to enable grubstation-shutdown service");
     }
 
-    info!("Starting grubstation service");
     Ok(())
 }
 
