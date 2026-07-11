@@ -1,5 +1,5 @@
 [Unit]
-Description=Grubstation Shutdown Hook
+Description=GrubStation Shutdown Hook
 DefaultDependencies=no
 Before=shutdown.target reboot.target halt.target
 After=network.target

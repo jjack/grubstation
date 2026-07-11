@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "grubstation")]
-#[command(about = "Grubstation CLI for configuration and synchronization", long_about = None)]
+#[command(about = "GrubStation CLI for configuration and synchronization", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -74,7 +74,7 @@ fn main() -> Result<()> {
 
             let (mdns, service_info) = mdns::start_advertisement(&config, &mac, &address)?;
             server::start_server(&config, config_path.clone(), mdns, service_info, mac, address, false)?;
-            println!("Grubstation daemon is running and advertising service via mDNS on port {}...", port);
+            println!("GrubStation daemon is running and advertising service via mDNS on port {}...", port);
 
             let (tx, rx) = std::sync::mpsc::channel();
             ctrlc::set_handler(move || {

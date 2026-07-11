@@ -272,17 +272,17 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
         let s = spinner();
         s.start("Registering grubstation shutdown hook...");
         crate::service::install_shutdown_hook(config_path)?;
-        s.stop("Grubstation shutdown hook registered.");
+        s.stop("GrubStation shutdown hook registered.");
     } else if config.daemon.is_some() {
         let s = spinner();
         s.start("Installing grubstation service...");
         crate::service::install_service(config_path)?;
-        s.stop("Grubstation service installed.");
+        s.stop("GrubStation service installed.");
 
         let s = spinner();
         s.start("Starting grubstation service...");
         crate::service::start_service()?;
-        s.stop("Grubstation service started.");
+        s.stop("GrubStation service started.");
     }
 
     outro("GrubStation setup completed successfully!")?;
