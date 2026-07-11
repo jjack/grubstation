@@ -854,7 +854,6 @@ mod tests {
                 interface: "lo".to_string(),
             },
             daemon: Some(crate::config::DaemonConfig { port: daemon_port }),
-            wake_on_lan: None,
             grub: Some(crate::config::GrubConfig {
                 path: grub_path,
                 network_wait: 10,
@@ -981,7 +980,6 @@ mod tests {
                 interface: "lo".to_string(),
             },
             daemon: Some(crate::config::DaemonConfig { port: daemon_port }),
-            wake_on_lan: None,
             grub: Some(crate::config::GrubConfig {
                 path: grub_path,
                 network_wait: 10,

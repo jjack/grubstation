@@ -176,31 +176,6 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
             .interact()?
     };
 
-    let mut broadcast_ip: Option<String> = None;
-    let matched_addr = selected_itf
-        .addr
-        .iter()
-        .find(|addr| addr.ip().to_string() == ip)
-        .or_else(|| {
-            selected_itf
-                .addr
-                .iter()
-                .find(|addr| matches!(addr, network_interface::Addr::V4(_)))
-        });
-
-    if let Some(network_interface::Addr::V4(v4_addr)) = matched_addr {
-        if let Some(bcast) = v4_addr.broadcast {
-            broadcast_ip = Some(bcast.to_string());
-        } else if let Some(netmask) = v4_addr.netmask {
-            let ip_octets = v4_addr.ip.octets();
-            let mask_octets = netmask.octets();
-            let mut bcast_octets = [0u8; 4];
-            for i in 0..4 {
-                bcast_octets[i] = ip_octets[i] | !mask_octets[i];
-            }
-            broadcast_ip = Some(std::net::Ipv4Addr::from(bcast_octets).to_string());
-        }
-    }
 
     // Daemon config
     let daemon = if mode == InstallMode::ShutdownHookOnly {
@@ -219,36 +194,6 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
         Some(crate::config::DaemonConfig { port })
     };
 
-    // WoL config
-    let wake_on_lan = {
-        let global_bcast = crate::config::DEFAULT_BROADCAST_ADDRESS;
-        let mut options = vec![
-            (
-                global_bcast.to_string(),
-                format!("Global Broadcast ({})", global_bcast),
-                "",
-            ),
-        ];
-        if let Some(ref subnet_bcast) = broadcast_ip {
-            if subnet_bcast != global_bcast {
-                options.push((
-                    subnet_bcast.clone(),
-                    format!("Subnet Broadcast ({})", subnet_bcast),
-                    "",
-                ));
-            }
-        }
-
-        let broadcast_address = select("WOL Broadcast Address")
-            .items(&options)
-            .interact()?;
-        let broadcast_port: u16 = crate::config::DEFAULT_BROADCAST_PORT;
-
-        Some(crate::config::WakeOnLanConfig {
-            broadcast_address,
-            broadcast_port,
-        })
-    };
 
     let mut network_wait = 2;
     if mode == InstallMode::DaemonBoth || mode == InstallMode::ShutdownHookOnly {
@@ -280,7 +225,6 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
     let config = crate::config::Config {
         host: crate::config::HostConfig { interface: selected_itf.name.clone() },
         daemon,
-        wake_on_lan,
         grub,
         webhook_id: None,
         api_key: None,
@@ -517,7 +461,6 @@ mod tests {
                 interface: "lo".to_string(),
             },
             daemon: None,
-            wake_on_lan: None,
             grub: Some(crate::config::GrubConfig {
                 path: PathBuf::from("Cargo.toml"),
                 network_wait: 3,
