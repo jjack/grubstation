@@ -156,25 +156,11 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
         )
         .interact()?;
 
-    // Select host IP address (IPv4 only)
-    let mut address_options = Vec::new();
-
-    for addr in &selected_itf.addr {
-        if addr.ip().is_ipv4() {
-            let ip = addr.ip().to_string();
-            address_options.push((ip.clone(), format!("{} (IP Address - Ensure this is static!)", ip), ""));
-        }
-    }
-
-    let ip = if address_options.is_empty() {
+    // Ensure the selected interface has at least one IPv4 address
+    let has_ipv4 = selected_itf.addr.iter().any(|addr| addr.ip().is_ipv4());
+    if !has_ipv4 {
         anyhow::bail!("Selected interface '{}' has no IPv4 addresses", selected_itf.name);
-    } else if address_options.len() == 1 {
-        address_options[0].0.clone()
-    } else {
-        select("Host IP Address (Used for communication with the daemon)")
-            .items(&address_options)
-            .interact()?
-    };
+    }
 
 
     // Daemon config
@@ -446,6 +432,18 @@ mod tests {
 
     #[test]
     fn test_check_write_permission_read_only() {
+        #[cfg(unix)]
+        {
+            // If running as root, the OS bypasses read-only permissions, so skip this test.
+            if let Ok(output) = std::process::Command::new("id").arg("-u").output() {
+                if let Ok(uid_str) = String::from_utf8(output.stdout) {
+                    if uid_str.trim() == "0" {
+                        return;
+                    }
+                }
+            }
+        }
+
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("config.yaml");
         {
