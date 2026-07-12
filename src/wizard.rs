@@ -214,8 +214,8 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
         grub,
         webhook_id: None,
         api_key: None,
-        ha_daemon_url: None,
-        ha_grub_url: None,
+        ha_url: None,
+        grub_boot_url: None,
     };
 
     // Save config
@@ -280,7 +280,7 @@ pub fn install_grub_hook_to_path(
     config: &crate::config::Config,
     grub_config: &crate::config::GrubConfig,
     hook_path: &Path,
-    ha_grub_url: Option<&str>,
+    grub_boot_url: Option<&str>,
 ) -> Result<()> {
     let (mac, address) = crate::config::resolve_interface_details(&config.host.interface)?;
     let wait_list = (1..=grub_config.network_wait)
@@ -291,7 +291,7 @@ pub fn install_grub_hook_to_path(
     // GRUB uses a device-like path syntax for HTTP networking requests,
     // formatted as `(http,host)/path/to/resource`.
     let default_boot_url = format!("(http,{})/api/grubstation/{}?token={}", address, mac, grub_config.webhook_id);
-    let boot_url = if let Some(url) = ha_grub_url {
+    let boot_url = if let Some(url) = grub_boot_url {
         // Strip the protocol prefix (e.g., http:// or https://)
         let url_without_proto = url.trim_start_matches("http://").trim_start_matches("https://");
         
@@ -335,14 +335,14 @@ pub fn install_grub_hook_to_path(
 pub fn install_grub_hook(
     config: &crate::config::Config,
     grub_config: &crate::config::GrubConfig,
-    ha_grub_url: Option<&str>,
+    grub_boot_url: Option<&str>,
     run_update_grub: bool,
 ) -> Result<()> {
     let hook_path_str = std::env::var("GRUBSTATION_HOOK_PATH")
         .unwrap_or_else(|_| "/etc/grub.d/99_grubstation".to_string());
     let hook_path = Path::new(&hook_path_str);
 
-    install_grub_hook_to_path(config, grub_config, hook_path, ha_grub_url)?;
+    install_grub_hook_to_path(config, grub_config, hook_path, grub_boot_url)?;
 
     if run_update_grub {
         #[cfg(target_os = "linux")]
@@ -471,8 +471,8 @@ mod tests {
             }),
             webhook_id: None,
             api_key: None,
-            ha_daemon_url: None,
-            ha_grub_url: None,
+            ha_url: None,
+            grub_boot_url: None,
         };
         let grub_config = config.grub.as_ref().unwrap();
 

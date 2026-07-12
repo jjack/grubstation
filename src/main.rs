@@ -109,7 +109,7 @@ fn main() -> Result<()> {
                 println!("Pushing initial boot options to Home Assistant...");
                 let (mac, _address) = config::resolve_interface_details(&config.host.interface)?;
                 crate::client::push_boot_options(
-                    &pair_req.ha_daemon_url,
+                    &pair_req.ha_url,
                     &pair_req.webhook_id,
                     &pair_req.api_key,
                     &mac,
@@ -134,7 +134,7 @@ fn main() -> Result<()> {
                         }
                     };
                     grub_config.webhook_id = pair_req.webhook_id.clone();
-                    crate::wizard::install_grub_hook(&config, &grub_config, Some(&pair_req.ha_grub_url), pair_req.update_grub)?;
+                    crate::wizard::install_grub_hook(&config, &grub_config, Some(&pair_req.grub_boot_url), pair_req.update_grub)?;
                 }
 
                 // Generate a random token
@@ -149,8 +149,8 @@ fn main() -> Result<()> {
                     "token": token,
                     "webhook_id": pair_req.webhook_id,
                     "api_key": pair_req.api_key,
-                    "ha_daemon_url": pair_req.ha_daemon_url,
-                    "ha_grub_url": pair_req.ha_grub_url,
+                    "ha_url": pair_req.ha_url,
+                    "grub_boot_url": pair_req.grub_boot_url,
                 });
 
                 let json_str = serde_json::to_string_pretty(&state_file_data)?;
@@ -252,13 +252,13 @@ pub fn run_sync(config_path: &std::path::Path, dry_run: bool) -> Result<()> {
             let webhook_id = state_val["webhook_id"].as_str()
                 .ok_or_else(|| anyhow::anyhow!("Missing webhook_id in state.json"))?;
             let api_key = state_val["api_key"].as_str().unwrap_or("");
-            let ha_daemon_url = state_val["ha_daemon_url"].as_str()
-                .ok_or_else(|| anyhow::anyhow!("Missing ha_daemon_url in state.json"))?;
+            let ha_url = state_val["ha_url"].as_str()
+                .ok_or_else(|| anyhow::anyhow!("Missing ha_url in state.json"))?;
 
             println!("Syncing to Home Assistant...");
             println!("Payload to send: {}", serde_json::to_string(&payload)?);
             if let Err(err) = crate::client::push_boot_options(
-                ha_daemon_url,
+                ha_url,
                 webhook_id,
                 api_key,
                 &mac,
@@ -374,8 +374,8 @@ mod tests {
             "token": "dummy-token",
             "webhook_id": "test-webhook-id",
             "api_key": "test-api-key",
-            "ha_daemon_url": format!("http://127.0.0.1:{}", ha_port),
-            "ha_grub_url": "http://127.0.0.1/grub",
+            "ha_url": format!("http://127.0.0.1:{}", ha_port),
+            "grub_boot_url": "http://127.0.0.1/grub",
         });
         std::fs::write(&state_path, serde_json::to_string_pretty(&state_data)?)?;
 
@@ -443,7 +443,7 @@ mod tests {
 
         // Run pair command via subcommand matching emulation
         let payload_str = format!(
-            "{{\"ha_daemon_url\":\"http://127.0.0.1:{}\",\"webhook_id\":\"test-webhook-id\",\"api_key\":\"test-api-key\",\"ha_grub_url\":\"http://127.0.0.1/grub\",\"update_grub\":false}}",
+            "{{\"ha_url\":\"http://127.0.0.1:{}\",\"webhook_id\":\"test-webhook-id\",\"api_key\":\"test-api-key\",\"grub_boot_url\":\"http://127.0.0.1/grub\",\"update_grub\":false}}",
             ha_port
         );
 
@@ -460,7 +460,7 @@ mod tests {
                 let entries = crate::grub::parse_grub_entries(&config.grub.as_ref().unwrap().path)?;
                 let (mac, _address) = config::resolve_interface_details(&config.host.interface)?;
                 crate::client::push_boot_options(
-                    &pair_req.ha_daemon_url,
+                    &pair_req.ha_url,
                     &pair_req.webhook_id,
                     &pair_req.api_key,
                     &mac,
@@ -474,8 +474,8 @@ mod tests {
                     "token": token,
                     "webhook_id": pair_req.webhook_id,
                     "api_key": pair_req.api_key,
-                    "ha_daemon_url": pair_req.ha_daemon_url,
-                    "ha_grub_url": pair_req.ha_grub_url,
+                    "ha_url": pair_req.ha_url,
+                    "grub_boot_url": pair_req.grub_boot_url,
                 });
                 std::fs::write(&state_path, serde_json::to_string_pretty(&state_file_data)?)?;
             }

@@ -13,15 +13,15 @@ use serde::{Deserialize, Serialize};
 pub struct PairRequest {
     pub webhook_id: String,
     pub api_key: String,
-    pub ha_daemon_url: String,
-    pub ha_grub_url: String,
+    pub ha_url: String,
+    pub grub_boot_url: String,
     pub update_grub: bool,
 }
 
 #[derive(Debug, Deserialize)]
 struct UpdateRequest {
-    ha_daemon_url: Option<String>,
-    ha_grub_url: Option<String>,
+    ha_url: Option<String>,
+    grub_boot_url: Option<String>,
     #[serde(default)]
     update_grub: bool,
 }
@@ -40,8 +40,8 @@ struct PersistedState {
     setup_pin: Option<String>,
     webhook_id: Option<String>,
     api_key: Option<String>,
-    ha_daemon_url: Option<String>,
-    ha_grub_url: Option<String>,
+    ha_url: Option<String>,
+    grub_boot_url: Option<String>,
 }
 
 pub fn start_server(
@@ -64,7 +64,7 @@ pub fn start_server(
     let mut initial_setup_pin = None;
     let mut webhook_id = None;
     let mut api_key = None;
-    let mut ha_daemon_url = None;
+    let mut ha_url = None;
 
     if state_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&state_path) {
@@ -74,7 +74,7 @@ pub fn start_server(
                 initial_setup_pin = state.setup_pin;
                 webhook_id = state.webhook_id;
                 api_key = state.api_key;
-                ha_daemon_url = state.ha_daemon_url;
+                ha_url = state.ha_url;
             }
         }
     }
@@ -113,7 +113,7 @@ pub fn start_server(
         }
 
         // Trigger startup sync of boot options to Home Assistant
-        if let (Some(webhook_id), Some(ha_daemon_url)) = (webhook_id, ha_daemon_url) {
+        if let (Some(webhook_id), Some(ha_url)) = (webhook_id, ha_url) {
             let api_key = api_key.unwrap_or_default();
             let sync_mac = mac.clone();
             let config = config.clone();
@@ -140,7 +140,7 @@ pub fn start_server(
                 match entries_res {
                     Ok(entries) => {
                         match crate::client::push_boot_options(
-                            &ha_daemon_url,
+                            &ha_url,
                             &webhook_id,
                             &api_key,
                             &sync_mac,
@@ -350,7 +350,7 @@ fn handle_pair(
         };
         grub_config.webhook_id = pair_req.webhook_id.clone();
 
-        if let Err(err) = crate::wizard::install_grub_hook(&config, &grub_config, Some(&pair_req.ha_grub_url), pair_req.update_grub) {
+        if let Err(err) = crate::wizard::install_grub_hook(&config, &grub_config, Some(&pair_req.grub_boot_url), pair_req.update_grub) {
             error!("Failed to apply GRUB configuration: {}", err);
             send_json_response(request, StatusCode::INTERNAL_SERVER_ERROR, json!({
                 "error": format!("Failed to apply GRUB configuration: {}", err)
@@ -401,8 +401,8 @@ fn handle_pair(
         setup_pin: None,
         webhook_id: Some(pair_req.webhook_id.clone()),
         api_key: Some(pair_req.api_key.clone()),
-        ha_daemon_url: Some(pair_req.ha_daemon_url.clone()),
-        ha_grub_url: Some(pair_req.ha_grub_url.clone()),
+        ha_url: Some(pair_req.ha_url.clone()),
+        grub_boot_url: Some(pair_req.grub_boot_url.clone()),
     };
 
     if let Ok(json_str) = serde_json::to_string_pretty(&state_file_data) {
@@ -419,7 +419,7 @@ fn handle_pair(
     info!("Pairing request handled successfully.");
 
     // Spawn background thread to perform initial sync of boot options after responding
-    let ha_daemon_url = pair_req.ha_daemon_url.clone();
+    let ha_url = pair_req.ha_url.clone();
     let webhook_id = pair_req.webhook_id.clone();
     let api_key = pair_req.api_key.clone();
     let mac = mac.clone();
@@ -428,7 +428,7 @@ fn handle_pair(
         std::thread::sleep(std::time::Duration::from_millis(500));
         info!("Performing initial sync of boot options to Home Assistant...");
         match crate::client::push_boot_options(
-            &ha_daemon_url,
+            &ha_url,
             &webhook_id,
             &api_key,
             &mac,
@@ -572,14 +572,14 @@ fn handle_update(
         }
     };
 
-    let new_ha_daemon_url = update_req.ha_daemon_url
-        .unwrap_or_else(|| current.ha_daemon_url.clone().unwrap_or_default());
-    let new_ha_grub_url = update_req.ha_grub_url
-        .unwrap_or_else(|| current.ha_grub_url.clone().unwrap_or_default());
+    let new_ha_url = update_req.ha_url
+        .unwrap_or_else(|| current.ha_url.clone().unwrap_or_default());
+    let new_grub_boot_url = update_req.grub_boot_url
+        .unwrap_or_else(|| current.grub_boot_url.clone().unwrap_or_default());
 
     info!(
-        "/update: ha_daemon_url={:?} ha_grub_url={:?} update_grub={}",
-        new_ha_daemon_url, new_ha_grub_url, update_req.update_grub
+        "/update: ha_url={:?} grub_boot_url={:?} update_grub={}",
+        new_ha_url, new_grub_boot_url, update_req.update_grub
     );
 
     // Optionally re-run the GRUB hook with the new URL
@@ -588,7 +588,7 @@ fn handle_update(
             if let Err(e) = crate::wizard::install_grub_hook(
                 &config,
                 grub_config,
-                Some(&new_ha_grub_url),
+                Some(&new_grub_boot_url),
                 true,
             ) {
                 error!("Failed to apply GRUB configuration during /update: {}", e);
@@ -602,8 +602,8 @@ fn handle_update(
 
     // Persist the updated state
     let updated = PersistedState {
-        ha_daemon_url: Some(new_ha_daemon_url.clone()),
-        ha_grub_url: Some(new_ha_grub_url.clone()),
+        ha_url: Some(new_ha_url.clone()),
+        grub_boot_url: Some(new_grub_boot_url.clone()),
         ..current
     };
     if let Ok(json_str) = serde_json::to_string_pretty(&updated) {
@@ -629,7 +629,7 @@ fn handle_update(
                     .unwrap_or_default()
             };
             match crate::client::push_boot_options(
-                &new_ha_daemon_url,
+                &new_ha_url,
                 &webhook_id,
                 &api_key,
                 &mac,
@@ -839,8 +839,8 @@ mod tests {
             setup_pin: Some("test-setup-pin".to_string()),
             webhook_id: None,
             api_key: None,
-            ha_daemon_url: None,
-            ha_grub_url: None,
+            ha_url: None,
+            grub_boot_url: None,
         };
         std::fs::write(&state_path, serde_json::to_string_pretty(&state_data)?)?;
 
@@ -861,8 +861,8 @@ mod tests {
             }),
             webhook_id: None,
             api_key: None,
-            ha_daemon_url: None,
-            ha_grub_url: None,
+            ha_url: None,
+            grub_boot_url: None,
         };
 
         let (mac, address) = crate::config::resolve_interface_details("lo").unwrap();
@@ -920,8 +920,8 @@ mod tests {
         let pair_payload = serde_json::json!({
             "webhook_id": "test-webhook-id",
             "api_key": "test-api-key",
-            "ha_daemon_url": format!("http://127.0.0.1:{}", ha_port),
-            "ha_grub_url": "http://127.0.0.1/grub",
+            "ha_url": format!("http://127.0.0.1:{}", ha_port),
+            "grub_boot_url": "http://127.0.0.1/grub",
             "update_grub": false,
         });
 
@@ -945,8 +945,8 @@ mod tests {
         assert_eq!(state_json["token"].as_str().unwrap(), token);
         assert_eq!(state_json["webhook_id"].as_str().unwrap(), "test-webhook-id");
         assert_eq!(state_json["api_key"].as_str().unwrap(), "test-api-key");
-        assert_eq!(state_json["ha_daemon_url"].as_str().unwrap(), format!("http://127.0.0.1:{}", ha_port));
-        assert_eq!(state_json["ha_grub_url"].as_str().unwrap(), "http://127.0.0.1/grub");
+        assert_eq!(state_json["ha_url"].as_str().unwrap(), format!("http://127.0.0.1:{}", ha_port));
+        assert_eq!(state_json["grub_boot_url"].as_str().unwrap(), "http://127.0.0.1/grub");
 
         // Wait for the mock HA thread to finish
         handle.join().unwrap();
@@ -987,8 +987,8 @@ mod tests {
             }),
             webhook_id: None,
             api_key: None,
-            ha_daemon_url: None,
-            ha_grub_url: None,
+            ha_url: None,
+            grub_boot_url: None,
         };
 
         // Write mock state.json containing setup_pin and paired: false
@@ -999,8 +999,8 @@ mod tests {
             setup_pin: Some("654321".to_string()),
             webhook_id: None,
             api_key: None,
-            ha_daemon_url: None,
-            ha_grub_url: None,
+            ha_url: None,
+            grub_boot_url: None,
         };
         std::fs::write(&state_path, serde_json::to_string_pretty(&state_data)?)?;
 
@@ -1039,8 +1039,8 @@ mod tests {
         let pair_payload = serde_json::json!({
             "webhook_id": "test-webhook-id",
             "api_key": "test-api-key",
-            "ha_daemon_url": format!("http://127.0.0.1:{}", ha_port),
-            "ha_grub_url": "http://127.0.0.1/grub",
+            "ha_url": format!("http://127.0.0.1:{}", ha_port),
+            "grub_boot_url": "http://127.0.0.1/grub",
             "update_grub": false,
         });
 

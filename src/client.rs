@@ -11,7 +11,7 @@ pub fn build_boot_options_payload(mac: &str, entries: &[String]) -> serde_json::
 }
 
 pub fn push_boot_options(
-    ha_daemon_url: &str,
+    ha_url: &str,
     webhook_id: &str,
     api_key: &str,
     mac: &str,
@@ -19,7 +19,7 @@ pub fn push_boot_options(
 ) -> Result<()> {
     let webhook_url = format!(
         "{}/api/webhook/{}",
-        ha_daemon_url.trim_end_matches('/'),
+        ha_url.trim_end_matches('/'),
         webhook_id
     );
 

@@ -27,9 +27,9 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ha_daemon_url: Option<String>,
+    pub ha_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ha_grub_url: Option<String>,
+    pub grub_boot_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
@@ -124,8 +124,8 @@ mod tests {
             }),
             webhook_id: None,
             api_key: None,
-            ha_daemon_url: None,
-            ha_grub_url: None,
+            ha_url: None,
+            grub_boot_url: None,
         }
     }
 
@@ -145,8 +145,8 @@ mod tests {
             grub: None,
             webhook_id: None,
             api_key: None,
-            ha_daemon_url: None,
-            ha_grub_url: None,
+            ha_url: None,
+            grub_boot_url: None,
         };
         assert!(config.validate().is_ok());
 
@@ -154,8 +154,8 @@ mod tests {
         let yaml = serde_yaml::to_string(&config).unwrap();
         assert!(!yaml.contains("webhook_id"));
         assert!(!yaml.contains("api_key"));
-        assert!(!yaml.contains("ha_daemon_url"));
-        assert!(!yaml.contains("ha_grub_url"));
+        assert!(!yaml.contains("ha_url"));
+        assert!(!yaml.contains("grub_boot_url"));
         assert!(!yaml.contains("daemon"));
         assert!(!yaml.contains("grub"));
     }
