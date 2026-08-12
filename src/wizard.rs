@@ -1,14 +1,7 @@
 use anyhow::Result;
-use cliclack::{confirm, input, intro, outro, select, spinner};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use std::path::{Path, PathBuf};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InstallMode {
-    DaemonBoth,
-    DaemonShutdownOnly,
-    ShutdownHookOnly,
-}
+use std::sync::Arc;
 
 fn check_write_permission(path: &Path) -> Result<()> {
     if path.exists() {
@@ -44,27 +37,191 @@ fn check_write_permission(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn wizard_init(config_path: &Path) -> Result<bool> {
+pub fn get_json_dump(config: &crate::config::Config) -> Result<serde_json::Value> {
+    let (mac, address) = crate::config::resolve_interface_details(&config.host.interface)?;
+    let system_hostname = hostname::get()?.to_string_lossy().into_owned();
+    let os_name = crate::server::get_os_name();
+    
+    // Parse GRUB entries
+    let entries = if let Some(ref gc) = config.grub {
+        crate::grub::parse_grub_entries(&gc.path)?
+    } else {
+        if let Some(path) = crate::config::DEFAULT_GRUB_PATHS.iter().map(std::path::PathBuf::from).find(|p| p.exists()) {
+            crate::grub::parse_grub_entries(&path)?
+        } else {
+            Vec::new()
+        }
+    };
+
+    Ok(serde_json::json!({
+        "mac": mac,
+        "address": address,
+        "hostname": system_hostname,
+        "os": os_name,
+        "boot_options": entries,
+    }))
+}
+
+pub fn wizard_init(config_path: &Path, daemonless: bool) -> Result<bool> {
     check_write_permission(config_path).map_err(|e| {
         anyhow::anyhow!("Permission check failed: Cannot write to config file at {:?}. Error: {}", config_path, e)
     })?;
 
-    intro("GrubStation Configuration Wizard")?;
+    println!("Initializing GrubStation configuration...");
 
-    cliclack::clear_screen().unwrap();
+    let config = if config_path.exists() {
+        println!("Existing configuration found at {:?}", config_path);
+        let mut loaded = match crate::config::load_config(config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("Warning: Failed to load existing config: {}. Recreating...", e);
+                create_default_config(daemonless)?
+            }
+        };
 
-    if config_path.exists() {
-        let should_overwrite = confirm(format!(
-            "GrubStation is already configured. Do you want to re-run setup and overwrite the existing configuration?",
-        ))
-        .initial_value(false)
-        .interact()?;
+        // Update daemon config based on daemonless flag
+        if daemonless {
+            loaded.daemon = None;
+        } else if loaded.daemon.is_none() {
+            loaded.daemon = Some(crate::config::DaemonConfig {
+                port: crate::config::DEFAULT_DAEMON_PORT,
+            });
+        }
 
-        if !should_overwrite {
-            outro("Initialization cancelled.")?;
-            return Ok(false);
+        let yaml = serde_yaml::to_string(&loaded)?;
+        std::fs::write(config_path, yaml)?;
+        loaded
+    } else {
+        let created = create_default_config(daemonless)?;
+        let yaml = serde_yaml::to_string(&created)?;
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(config_path, yaml)?;
+        println!("New configuration generated and saved to {:?}", config_path);
+        created
+    };
+
+    // Validate the generated config
+    if let Err(e) = crate::config::load_config(config_path) {
+        anyhow::bail!("Generated config failed validation: {}", e);
+    }
+
+    let setup_pin = format!("{:06}", fastrand::u32(0..1_000_000));
+
+    // Save initial state.json containing setup_pin and paired: false
+    let state_path = config_path.parent().unwrap_or(Path::new(".")).join("state.json");
+    let state_data = serde_json::json!({
+        "paired": false,
+        "setup_pin": setup_pin.clone(),
+    });
+    let json_str = serde_json::to_string_pretty(&state_data)?;
+    std::fs::write(&state_path, json_str)?;
+
+    if daemonless {
+        println!("Installing shutdown hook...");
+        if let Err(e) = crate::service::install_shutdown_hook(config_path) {
+            println!("Warning: Failed to install shutdown hook (perhaps running without root?): {}", e);
+        } else {
+            println!("GrubStation shutdown hook registered successfully.");
+        }
+
+        println!("\nGrubStation initialized in daemonless/shutdown-only mode!");
+        println!("Your setup PIN is: \x1b[1;32m{}\x1b[0m", setup_pin);
+        
+        let dump = get_json_dump(&config)?;
+        println!("\nJSON Dump for manual configuration in Home Assistant:");
+        println!("{}", serde_json::to_string_pretty(&dump)?);
+    } else {
+        println!("\nYour setup PIN is: \x1b[1;32m{}\x1b[0m", setup_pin);
+        println!("Starting temporary pairing server in-process...");
+
+        let (mac, address) = crate::config::resolve_interface_details(&config.host.interface)?;
+        let (mdns, service_info) = crate::mdns::start_advertisement(&config, &mac, &address)?;
+
+        let port = config.daemon.as_ref().map(|d| d.port).unwrap_or(crate::config::DEFAULT_DAEMON_PORT);
+        println!("Temporary pairing server is running and advertising via mDNS on port {}...", port);
+        println!("Enter the PIN in Home Assistant to complete configuration.");
+        println!("This server will automatically exit after successful pairing or in 5 minutes.");
+
+        crate::server::start_server(&config, config_path.to_path_buf(), mdns, service_info, mac, address, true)?;
+
+        // Poll state.json until paired or timeout (5 minutes)
+        let start_time = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(300);
+        let mut paired = false;
+
+        // Listen for Ctrl+C to cancel setup
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let c_cancelled = Arc::clone(&cancelled);
+        ctrlc::set_handler(move || {
+            c_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        })?;
+
+        println!("Waiting for pairing... Press Ctrl+C to cancel.");
+        while start_time.elapsed() < timeout {
+            if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                anyhow::bail!("Pairing cancelled by user.");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if state_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&state_path) {
+                    if let Ok(state_val) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if state_val["paired"].as_bool().unwrap_or(false) {
+                            paired = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !paired {
+            anyhow::bail!("Pairing timeout reached or pairing failed. Please try running `grubstation init` again.");
+        }
+
+        println!("\nPairing successful!");
+        println!("Waiting 3 seconds for initial sync to complete...");
+        std::thread::sleep(std::time::Duration::from_secs(3));
+
+        println!("Installing system service...");
+        if let Err(e) = crate::service::install_service(config_path) {
+            println!("Warning: Failed to install system service: {}. You may need to run this command with sudo/Administrator privileges.", e);
+        } else {
+            println!("GrubStation system service installed.");
+            println!("Starting system service...");
+            if let Err(e) = crate::service::start_service() {
+                println!("Warning: Failed to start system service: {}. You may need to run this command with sudo/Administrator privileges.", e);
+            } else {
+                println!("Setup complete! Daemon registered and running in the background.");
+            }
         }
     }
+
+    Ok(true)
+}
+
+fn create_default_config(daemonless: bool) -> Result<crate::config::Config> {
+    let interfaces = NetworkInterface::show().map_err(|e| anyhow::anyhow!(e))?;
+    let filtered_interfaces: Vec<_> = interfaces
+        .into_iter()
+        .filter(|itf| {
+            if itf.name == "lo" || itf.name.starts_with("loop") {
+                return false;
+            }
+            let virtual_patterns = ["veth", "docker", "br-", "virbr", "any", "tun", "tap"];
+            if virtual_patterns.iter().any(|p| itf.name.starts_with(p)) {
+                return false;
+            }
+            itf.mac_addr.is_some() && itf.addr.iter().any(|a| a.ip().is_ipv4())
+        })
+        .collect();
+
+    if filtered_interfaces.is_empty() {
+        anyhow::bail!("No active ethernet interfaces found.");
+    }
+
+    let selected_itf = &filtered_interfaces[0];
 
     let mut grub_config_path: Option<String> = None;
     if cfg!(target_os = "linux") {
@@ -76,204 +233,34 @@ pub fn wizard_init(config_path: &Path) -> Result<bool> {
         }
     }
 
-    let has_grub = grub_config_path.is_some();
-    let mode = if has_grub {
-        select("Installation Mode")
-            .items(&[
-                (
-                    InstallMode::DaemonBoth,
-                    "Daemon (Remote shutdown + Report boot options)",
-                    "",
-                ),
-                (
-                    InstallMode::DaemonShutdownOnly,
-                    "Daemon (Remote shutdown only)",
-                    "",
-                ),
-                (
-                    InstallMode::ShutdownHookOnly,
-                    "Shutdown hook (Report boot options only)",
-                    "",
-                ),
-            ])
-            .interact()?
+    let grub = if let Some(path) = grub_config_path {
+        Some(crate::config::GrubConfig {
+            path: PathBuf::from(path),
+            network_wait: 10,
+            webhook_id: String::new(),
+        })
     } else {
-        select("Installation Mode")
-            .items(&[(
-                InstallMode::DaemonShutdownOnly,
-                "Daemon (Remote shutdown only)",
-                "",
-            )])
-            .interact()?
+        None
     };
 
-    // Network interface selection
-    let interfaces = NetworkInterface::show().map_err(|e| anyhow::anyhow!(e))?;
-    let filtered_interfaces: Vec<_> = interfaces
-        .into_iter()
-        .filter(|itf| {
-            // Filter out loopback
-            if itf.name == "lo" || itf.name.starts_with("loop") {
-                return false;
-            }
-            // Filter out virtual interfaces (common patterns)
-            let virtual_patterns = ["veth", "docker", "br-", "virbr", "any", "tun", "tap"];
-            if virtual_patterns.iter().any(|p| itf.name.starts_with(p)) {
-                return false;
-            }
-            // Must have a MAC address and at least one IPv4 address
-            itf.mac_addr.is_some() && itf.addr.iter().any(|a| a.ip().is_ipv4())
-        })
-        .collect();
-
-    if filtered_interfaces.is_empty() {
-        anyhow::bail!("No active ethernet interfaces found.");
-    }
-
-    let items: Vec<_> = filtered_interfaces
-        .iter()
-        .map(|itf| {
-            let ips: Vec<_> = itf.addr.iter()
-                .filter(|a| a.ip().is_ipv4())
-                .map(|a| a.ip().to_string())
-                .collect();
-            let label = format!(
-                "{} (MAC: {}, IPs: {})",
-                itf.name,
-                itf.mac_addr.as_ref().unwrap_or(&"Unknown".to_string()),
-                ips.join(", ")
-            );
-            (itf, label)
-        })
-        .collect();
-
-    let selected_itf = select("Available Network Interfaces:")
-        .items(
-            &items
-                .iter()
-                .map(|(itf, label)| (itf, label, ""))
-                .collect::<Vec<_>>(),
-        )
-        .interact()?;
-
-    // Ensure the selected interface has at least one IPv4 address
-    let has_ipv4 = selected_itf.addr.iter().any(|addr| addr.ip().is_ipv4());
-    if !has_ipv4 {
-        anyhow::bail!("Selected interface '{}' has no IPv4 addresses", selected_itf.name);
-    }
-
-
-    // Daemon config
-    let daemon = if mode == InstallMode::ShutdownHookOnly {
+    let daemon = if daemonless {
         None
     } else {
-        let port_str: String = input("Daemon Port")
-            .default_input(&crate::config::DEFAULT_DAEMON_PORT.to_string())
-            .validate(|input: &String| {
-                input
-                    .parse::<u16>()
-                    .map(|_| ())
-                    .map_err(|_| "Invalid port number")
-            })
-            .interact()?;
-        let port = port_str.parse::<u16>()?;
-        Some(crate::config::DaemonConfig { port })
+        Some(crate::config::DaemonConfig {
+            port: crate::config::DEFAULT_DAEMON_PORT,
+        })
     };
 
-
-    let mut network_wait = 2;
-    if mode == InstallMode::DaemonBoth || mode == InstallMode::ShutdownHookOnly {
-        let network_wait_str: String = input("GRUB Network Wait (seconds)")
-            .default_input("2")
-            .validate(|input: &String| {
-                input
-                    .parse::<u32>()
-                    .map(|_| ())
-                    .map_err(|_| "Invalid number of seconds")
-            })
-            .interact()?;
-        network_wait = network_wait_str.parse::<u32>()?;
-    }
-
-    let grub = match mode {
-        InstallMode::DaemonBoth | InstallMode::ShutdownHookOnly => {
-            grub_config_path.map(|path| crate::config::GrubConfig {
-                path: PathBuf::from(path),
-                network_wait,
-                webhook_id: String::new(),
-            })
-        }
-        InstallMode::DaemonShutdownOnly => None,
-    };
-
-    let setup_pin = format!("{:06}", fastrand::u32(0..1_000_000));
-
-    let config = crate::config::Config {
-        host: crate::config::HostConfig { interface: selected_itf.name.clone() },
+    Ok(crate::config::Config {
+        host: crate::config::HostConfig {
+            interface: selected_itf.name.clone(),
+        },
         daemon,
         grub,
         webhook_id: None,
         api_key: None,
         ha_url: None,
-        grub_boot_url: None,
-    };
-
-    // Save config
-    let yaml = serde_yaml::to_string(&config)?;
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(config_path, yaml)?;
-
-    // Validate the generated config
-    if let Err(e) = crate::config::load_config(config_path) {
-        anyhow::bail!("Generated config failed validation: {}", e);
-    }
-
-    // Save initial state.json containing setup_pin and paired: false
-    let state_path = config_path.parent().unwrap_or(Path::new(".")).join("state.json");
-    let state_data = serde_json::json!({
-        "paired": false,
-        "setup_pin": setup_pin.clone(),
-    });
-    if let Ok(json_str) = serde_json::to_string_pretty(&state_data) {
-        let _ = std::fs::write(&state_path, json_str);
-    }
-
-    cliclack::log::step(format!("Configuration saved to {:?}.",config_path))?;
-
-    if mode != InstallMode::ShutdownHookOnly {
-        cliclack::log::success(format!(
-            "Home Assistant Pairing PIN: \x1b[1m{}\x1b[0m",
-            setup_pin
-        ))?;
-    }
-
-    if let Some(ref grub_config) = config.grub {
-        if !grub_config.webhook_id.is_empty() {
-            install_grub_hook(&config, grub_config, None, true)?;
-        }
-    }
-    if mode == InstallMode::ShutdownHookOnly {
-        let s = spinner();
-        s.start("Registering grubstation shutdown hook...");
-        crate::service::install_shutdown_hook(config_path)?;
-        s.stop("GrubStation shutdown hook registered.");
-    } else if config.daemon.is_some() {
-        let s = spinner();
-        s.start("Installing grubstation service...");
-        crate::service::install_service(config_path)?;
-        s.stop("GrubStation service installed.");
-
-        let s = spinner();
-        s.start("Starting grubstation service...");
-        crate::service::start_service()?;
-        s.stop("GrubStation service started.");
-    }
-
-    outro("GrubStation setup completed successfully!")?;
-
-    Ok(false)
+    })
 }
 
 pub fn install_grub_hook_to_path(
@@ -472,7 +459,6 @@ mod tests {
             webhook_id: None,
             api_key: None,
             ha_url: None,
-            grub_boot_url: None,
         };
         let grub_config = config.grub.as_ref().unwrap();
 

@@ -9,6 +9,7 @@ mod client;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "grubstation")]
@@ -20,12 +21,20 @@ struct Cli {
     /// Sets a custom config file
     #[arg(short, long, value_name = "FILE", global = true)]
     config: Option<PathBuf>,
+
+    /// Enable debug mode for verbose logging
+    #[arg(long, global = true)]
+    debug: bool,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Runs the wizard to scaffold your initial configuration file.
-    Init,
+    /// Initializes your configuration and generates a pairing PIN.
+    Init {
+        /// Configure without starting the daemon (daemonless, shutdown-only mode).
+        #[arg(long)]
+        daemonless: bool,
+    },
     /// Parses the config strictly for syntax and logical errors without executing anything.
     Validate,
     /// Explicitly starts the long-running process.
@@ -47,8 +56,9 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cli = Cli::parse();
+    let log_level = if cli.debug { "debug" } else { "info" };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level)).init();
 
     let config_path = cli
         .config
@@ -56,8 +66,8 @@ fn main() -> Result<()> {
         .unwrap_or_else(config::get_default_config_path);
 
     match &cli.command {
-        Commands::Init => {
-            wizard::wizard_init(&config_path)?;
+        Commands::Init { daemonless } => {
+            wizard::wizard_init(&config_path, *daemonless)?;
         }
         Commands::Validate => match config::load_config(&config_path) {
             Ok(_) => println!("Configuration is valid."),
@@ -94,7 +104,14 @@ fn main() -> Result<()> {
                 println!("Manual pairing payload detected. Parsing...");
 
                 // Parse GRUB entries
-                let config = config::load_config(&config_path).map_err(|e| anyhow::anyhow!("{}", e))?;
+                let mut config = config::load_config(&config_path).map_err(|e| anyhow::anyhow!("{}", e))?;
+                if config.host.interface != pair_req.interface {
+                    println!("Updating interface configuration in config.yaml to '{}'", pair_req.interface);
+                    config.host.interface = pair_req.interface.clone();
+                    let yaml = serde_yaml::to_string(&config)?;
+                    std::fs::write(&config_path, yaml)?;
+                }
+
                 let entries = if let Some(ref gc) = config.grub {
                     crate::grub::parse_grub_entries(&gc.path)?
                 } else {
@@ -134,7 +151,8 @@ fn main() -> Result<()> {
                         }
                     };
                     grub_config.webhook_id = pair_req.webhook_id.clone();
-                    crate::wizard::install_grub_hook(&config, &grub_config, Some(&pair_req.grub_boot_url), pair_req.update_grub)?;
+                    let derived_grub_boot_url = format!("{}/api/webhook/{}", pair_req.ha_url.trim_end_matches('/'), pair_req.webhook_id);
+                    crate::wizard::install_grub_hook(&config, &grub_config, Some(&derived_grub_boot_url), pair_req.update_grub)?;
                 }
 
                 // Generate a random token
@@ -150,7 +168,6 @@ fn main() -> Result<()> {
                     "webhook_id": pair_req.webhook_id,
                     "api_key": pair_req.api_key,
                     "ha_url": pair_req.ha_url,
-                    "grub_boot_url": pair_req.grub_boot_url,
                 });
 
                 let json_str = serde_json::to_string_pretty(&state_file_data)?;
@@ -170,20 +187,45 @@ fn main() -> Result<()> {
                 println!("Temporary pairing server is running and advertising via mDNS on port {}...", port);
                 println!("This server will automatically exit after successful pairing or in 5 minutes.");
 
-                // Spawn timeout thread
-                std::thread::spawn(|| {
-                    std::thread::sleep(std::time::Duration::from_secs(300));
-                    println!("\nPairing timeout reached. Exiting...");
-                    std::process::exit(1);
-                });
+                // Poll state.json until paired or timeout (5 minutes)
+                let start_time = std::time::Instant::now();
+                let timeout = std::time::Duration::from_secs(300);
+                let mut paired = false;
 
-                // Keep main thread alive (or wait for ctrl-c)
-                let (tx, rx) = std::sync::mpsc::channel();
+                // Listen for Ctrl+C to cancel setup
+                let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let c_cancelled = Arc::clone(&cancelled);
                 ctrlc::set_handler(move || {
-                    let _ = tx.send(());
+                    c_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
                 })?;
-                let _ = rx.recv();
-                println!("Shutdown signal received. Exiting...");
+
+                let state_path = config_path.parent().unwrap_or(std::path::Path::new(".")).join("state.json");
+                println!("Waiting for pairing... Press Ctrl+C to cancel.");
+                while start_time.elapsed() < timeout {
+                    if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                        anyhow::bail!("Pairing cancelled by user.");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if state_path.exists() {
+                        if let Ok(content) = std::fs::read_to_string(&state_path) {
+                            if let Ok(state_val) = serde_json::from_str::<serde_json::Value>(&content) {
+                                if state_val["paired"].as_bool().unwrap_or(false) {
+                                    paired = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !paired {
+                    anyhow::bail!("Pairing timeout reached or pairing failed.");
+                }
+
+                println!("\nPairing successful!");
+                println!("Waiting 3 seconds for initial sync to complete...");
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                println!("Setup complete!");
             }
         }
         Commands::Sync { dry_run } => {
@@ -375,7 +417,6 @@ mod tests {
             "webhook_id": "test-webhook-id",
             "api_key": "test-api-key",
             "ha_url": format!("http://127.0.0.1:{}", ha_port),
-            "grub_boot_url": "http://127.0.0.1/grub",
         });
         std::fs::write(&state_path, serde_json::to_string_pretty(&state_data)?)?;
 
@@ -443,7 +484,7 @@ mod tests {
 
         // Run pair command via subcommand matching emulation
         let payload_str = format!(
-            "{{\"ha_url\":\"http://127.0.0.1:{}\",\"webhook_id\":\"test-webhook-id\",\"api_key\":\"test-api-key\",\"grub_boot_url\":\"http://127.0.0.1/grub\",\"update_grub\":false}}",
+            "{{\"ha_url\":\"http://127.0.0.1:{}\",\"webhook_id\":\"test-webhook-id\",\"api_key\":\"test-api-key\",\"update_grub\":false,\"interface\":\"lo\"}}",
             ha_port
         );
 
@@ -456,7 +497,12 @@ mod tests {
             Commands::Pair { payload } => {
                 let payload_val = payload.unwrap();
                 let pair_req: crate::server::PairRequest = serde_json::from_str(&payload_val)?;
-                let config = config::load_config(&config_path).map_err(|e| anyhow::anyhow!("{}", e))?;
+                let mut config = config::load_config(&config_path).map_err(|e| anyhow::anyhow!("{}", e))?;
+                if config.host.interface != pair_req.interface {
+                    config.host.interface = pair_req.interface.clone();
+                    let yaml = serde_yaml::to_string(&config)?;
+                    std::fs::write(&config_path, yaml)?;
+                }
                 let entries = crate::grub::parse_grub_entries(&config.grub.as_ref().unwrap().path)?;
                 let (mac, _address) = config::resolve_interface_details(&config.host.interface)?;
                 crate::client::push_boot_options(
@@ -475,7 +521,6 @@ mod tests {
                     "webhook_id": pair_req.webhook_id,
                     "api_key": pair_req.api_key,
                     "ha_url": pair_req.ha_url,
-                    "grub_boot_url": pair_req.grub_boot_url,
                 });
                 std::fs::write(&state_path, serde_json::to_string_pretty(&state_file_data)?)?;
             }

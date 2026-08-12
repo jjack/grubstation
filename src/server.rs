@@ -8,20 +8,20 @@ use serde_json::json;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
+use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PairRequest {
     pub webhook_id: String,
     pub api_key: String,
     pub ha_url: String,
-    pub grub_boot_url: String,
     pub update_grub: bool,
+    pub interface: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct UpdateRequest {
     ha_url: Option<String>,
-    grub_boot_url: Option<String>,
     #[serde(default)]
     update_grub: bool,
 }
@@ -41,7 +41,6 @@ struct PersistedState {
     webhook_id: Option<String>,
     api_key: Option<String>,
     ha_url: Option<String>,
-    grub_boot_url: Option<String>,
 }
 
 pub fn start_server(
@@ -242,6 +241,66 @@ fn get_bearer_token(req: &Request) -> Option<String> {
     None
 }
 
+fn get_network_interfaces() -> serde_json::Value {
+    let interfaces = match NetworkInterface::show() {
+        Ok(itfs) => itfs,
+        Err(e) => {
+            error!("Failed to list network interfaces: {}", e);
+            return json!([]);
+        }
+    };
+
+    let list: Vec<serde_json::Value> = interfaces
+        .into_iter()
+        .filter(|itf| {
+            if itf.name == "lo" || itf.name.starts_with("loop") {
+                return false;
+            }
+            let virtual_patterns = ["veth", "docker", "br-", "virbr", "any", "tun", "tap"];
+            if virtual_patterns.iter().any(|p| itf.name.starts_with(p)) {
+                return false;
+            }
+            itf.mac_addr.is_some() && itf.addr.iter().any(|a| a.ip().is_ipv4())
+        })
+        .map(|itf| {
+            let ip_addresses: Vec<String> = itf.addr.iter()
+                .filter(|a| a.ip().is_ipv4())
+                .map(|a| a.ip().to_string())
+                .collect();
+            let ip_address = ip_addresses.first().cloned().unwrap_or_default();
+            json!({
+                "name": itf.name,
+                "mac_address": itf.mac_addr,
+                "ip_address": ip_address,
+                "ip_addresses": ip_addresses,
+            })
+        })
+        .collect();
+    json!(list)
+}
+
+fn handle_interfaces(request: Request, state: &Arc<Mutex<DaemonState>>) -> Result<()> {
+    let s = state.lock().unwrap();
+    let provided_token = get_bearer_token(&request);
+    
+    let authenticated = match (&s.token, &s.setup_pin, &provided_token) {
+        (Some(saved_token), _, Some(token)) if saved_token == token => true,
+        (_, Some(setup_pin), Some(token)) if setup_pin == token => true,
+        _ => false,
+    };
+
+    if !authenticated {
+        warn!("Unauthorized /interfaces attempt from {:?}", request.remote_addr());
+        send_json_response(request, StatusCode::UNAUTHORIZED, json!({
+            "error": "invalid_token"
+        }))?;
+        return Ok(());
+    }
+
+    send_json_response(request, StatusCode::OK, get_network_interfaces())?;
+    Ok(())
+}
+
 fn handle_status(request: Request, state: &Arc<Mutex<DaemonState>>) -> Result<()> {
     let paired = state.lock().unwrap().paired;
     let response_body = json!({
@@ -254,18 +313,16 @@ fn handle_status(request: Request, state: &Arc<Mutex<DaemonState>>) -> Result<()
     Ok(())
 }
 
-fn handle_pair(
+fn handle_pair_verify(
     mut request: Request,
     state: Arc<Mutex<DaemonState>>,
-    mdns: Arc<ServiceDaemon>,
-    current_service_info: Arc<Mutex<ServiceInfo>>,
     mac: String,
-    address: String,
     config: crate::config::Config,
-    config_path: PathBuf,
-    is_temp: bool,
 ) -> Result<()> {
-    let state_path = config_path.parent().unwrap_or(Path::new(".")).join("state.json");
+    let mut content = String::new();
+    let _ = request.as_reader().read_to_string(&mut content);
+    debug!("Received /pair/verify payload: {}", content);
+
     let mut s = state.lock().unwrap();
     let provided_token = get_bearer_token(&request);
     let pin_matched = match (&s.setup_pin, &provided_token) {
@@ -274,18 +331,81 @@ fn handle_pair(
     };
     if !pin_matched {
         if s.paired && s.setup_pin.is_none() {
-            // Already paired and no PIN set — instruct caller to reset the PIN first
-            warn!("Re-pair attempt from {:?} rejected: already paired and no setup PIN is set (run `grubstation reset-pin`)", request.remote_addr());
+            warn!("Re-pair verify attempt from {:?} rejected: already paired and no setup PIN is set (run `grubstation reset-pin`)", request.remote_addr());
             send_json_response(request, StatusCode::CONFLICT, json!({
                 "error": "already_paired",
                 "hint": "Run `grubstation reset-pin` on the host to generate a new pairing PIN."
             }))?;
         } else {
-            warn!("Unauthorized /pair attempt from {:?}: invalid PIN", request.remote_addr());
+            warn!("Unauthorized /pair/verify attempt from {:?}: invalid PIN", request.remote_addr());
             send_json_response(request, StatusCode::UNAUTHORIZED, json!({
                 "error": "invalid_pin"
             }))?;
         }
+        return Ok(());
+    }
+
+    // Extract/parse the host's current GRUB entries
+    let entries = match (|| -> Result<Vec<String>> {
+        if let Some(ref gc) = config.grub {
+            Ok(crate::grub::parse_grub_entries(&gc.path)?)
+        } else {
+            if let Some(path) = crate::config::DEFAULT_GRUB_PATHS.iter().map(PathBuf::from).find(|p| p.exists()) {
+                Ok(crate::grub::parse_grub_entries(&path)?)
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    })() {
+        Ok(e) => e,
+        Err(err) => {
+            error!("Failed to parse GRUB entries: {}", err);
+            Vec::new()
+        }
+    };
+
+    let token = generate_token();
+    s.token = Some(token.clone());
+
+    let system_hostname = hostname::get()?.to_string_lossy().into_owned();
+    let os_name = get_os_name();
+
+    send_json_response(request, StatusCode::OK, json!({
+        "success": true,
+        "token": token,
+        "mac": mac,
+        "hostname": system_hostname,
+        "os": os_name,
+        "boot_options": entries
+    }))?;
+
+    info!("PIN verified successfully. Session token generated.");
+    Ok(())
+}
+
+fn handle_pair(
+    mut request: Request,
+    state: Arc<Mutex<DaemonState>>,
+    mdns: Arc<ServiceDaemon>,
+    current_service_info: Arc<Mutex<ServiceInfo>>,
+    _mac: String,
+    _address: String,
+    config: crate::config::Config,
+    config_path: PathBuf,
+    _is_temp: bool,
+) -> Result<()> {
+    let state_path = config_path.parent().unwrap_or(Path::new(".")).join("state.json");
+    let mut s = state.lock().unwrap();
+    let provided_token = get_bearer_token(&request);
+    let token_matched = match (&s.token, &provided_token) {
+        (Some(saved_token), Some(token)) => saved_token == token,
+        _ => false,
+    };
+    if !token_matched {
+        warn!("Unauthorized /pair attempt from {:?}: invalid session token", request.remote_addr());
+        send_json_response(request, StatusCode::UNAUTHORIZED, json!({
+            "error": "invalid_token"
+        }))?;
         return Ok(());
     }
 
@@ -310,6 +430,30 @@ fn handle_pair(
         }
     };
 
+    // Resolve selected interface details
+    let (mac, address) = match crate::config::resolve_interface_details(&pair_req.interface) {
+        Ok(details) => details,
+        Err(err) => {
+            error!("Failed to resolve interface details for '{}': {}", pair_req.interface, err);
+            send_json_response(request, StatusCode::BAD_REQUEST, json!({
+                "error": format!("Failed to resolve interface details: {}", err)
+            }))?;
+            return Ok(());
+        }
+    };
+
+    // Update config.yaml with the chosen interface
+    let mut config = config.clone();
+    if config.host.interface != pair_req.interface {
+        info!("Updating interface configuration in config.yaml to '{}'", pair_req.interface);
+        config.host.interface = pair_req.interface.clone();
+        if let Ok(yaml) = serde_yaml::to_string(&config) {
+            if let Err(e) = std::fs::write(&config_path, yaml) {
+                error!("Failed to write updated config.yaml: {}", e);
+            }
+        }
+    }
+
     // Extract/parse the host's current GRUB entries
     let entries = match (|| -> Result<Vec<String>> {
         if let Some(ref gc) = config.grub {
@@ -318,17 +462,14 @@ fn handle_pair(
             if let Some(path) = crate::config::DEFAULT_GRUB_PATHS.iter().map(PathBuf::from).find(|p| p.exists()) {
                 Ok(crate::grub::parse_grub_entries(&path)?)
             } else {
-                anyhow::bail!("No GRUB configuration file found at default paths.")
+                Ok(Vec::new())
             }
         }
     })() {
         Ok(e) => e,
         Err(err) => {
             error!("Failed to parse GRUB entries: {}", err);
-            send_json_response(request, StatusCode::INTERNAL_SERVER_ERROR, json!({
-                "error": format!("Failed to parse GRUB entries: {}", err)
-            }))?;
-            return Ok(());
+            Vec::new()
         }
     };
 
@@ -350,7 +491,8 @@ fn handle_pair(
         };
         grub_config.webhook_id = pair_req.webhook_id.clone();
 
-        if let Err(err) = crate::wizard::install_grub_hook(&config, &grub_config, Some(&pair_req.grub_boot_url), pair_req.update_grub) {
+        let derived_grub_boot_url = format!("{}/api/webhook/{}", pair_req.ha_url.trim_end_matches('/'), pair_req.webhook_id);
+        if let Err(err) = crate::wizard::install_grub_hook(&config, &grub_config, Some(&derived_grub_boot_url), pair_req.update_grub) {
             error!("Failed to apply GRUB configuration: {}", err);
             send_json_response(request, StatusCode::INTERNAL_SERVER_ERROR, json!({
                 "error": format!("Failed to apply GRUB configuration: {}", err)
@@ -359,11 +501,10 @@ fn handle_pair(
         }
     }
 
-    // Generate a random token
-    let token = generate_token();
+    // Generate/finalize token
     s.paired = true;
-    s.token = Some(token.clone());
     s.setup_pin = None;
+    let token = s.token.clone().unwrap_or_else(generate_token);
 
     // Update mDNS advertisement
     let mut info = current_service_info.lock().unwrap();
@@ -402,7 +543,6 @@ fn handle_pair(
         webhook_id: Some(pair_req.webhook_id.clone()),
         api_key: Some(pair_req.api_key.clone()),
         ha_url: Some(pair_req.ha_url.clone()),
-        grub_boot_url: Some(pair_req.grub_boot_url.clone()),
     };
 
     if let Ok(json_str) = serde_json::to_string_pretty(&state_file_data) {
@@ -411,12 +551,10 @@ fn handle_pair(
     }
 
     send_json_response(request, StatusCode::OK, json!({
-        "success": true,
-        "token": token,
-        "mac": mac
+        "success": true
     }))?;
 
-    info!("Pairing request handled successfully.");
+    info!("Pairing configuration hand-off completed successfully.");
 
     // Spawn background thread to perform initial sync of boot options after responding
     let ha_url = pair_req.ha_url.clone();
@@ -443,13 +581,6 @@ fn handle_pair(
         }
     });
 
-    if is_temp {
-        info!("Pairing completed in temporary server. Shutting down pairing server in 3 seconds to allow initial sync to complete...");
-        std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_secs(3));
-            std::process::exit(0);
-        });
-    }
     Ok(())
 }
 
@@ -550,6 +681,7 @@ fn handle_update(
         }))?;
         return Ok(());
     }
+    debug!("Received /update payload: {}", content);
     let update_req: UpdateRequest = match serde_json::from_str(&content) {
         Ok(r) => r,
         Err(e) => {
@@ -574,11 +706,14 @@ fn handle_update(
 
     let new_ha_url = update_req.ha_url
         .unwrap_or_else(|| current.ha_url.clone().unwrap_or_default());
-    let new_grub_boot_url = update_req.grub_boot_url
-        .unwrap_or_else(|| current.grub_boot_url.clone().unwrap_or_default());
+    let new_grub_boot_url = if let Some(ref webhook_id) = current.webhook_id {
+        format!("{}/api/webhook/{}", new_ha_url.trim_end_matches('/'), webhook_id)
+    } else {
+        String::new()
+    };
 
     info!(
-        "/update: ha_url={:?} grub_boot_url={:?} update_grub={}",
+        "/update: ha_url={:?} derived_grub_boot_url={:?} update_grub={}",
         new_ha_url, new_grub_boot_url, update_req.update_grub
     );
 
@@ -603,7 +738,6 @@ fn handle_update(
     // Persist the updated state
     let updated = PersistedState {
         ha_url: Some(new_ha_url.clone()),
-        grub_boot_url: Some(new_grub_boot_url.clone()),
         ..current
     };
     if let Ok(json_str) = serde_json::to_string_pretty(&updated) {
@@ -695,6 +829,13 @@ fn handle_request(
 
     match (method, url) {
         ("GET", "/status") => handle_status(request, &state)?,
+        ("GET", "/interfaces") => handle_interfaces(request, &state)?,
+        ("POST", "/pair/verify") => handle_pair_verify(
+            request,
+            state,
+            mac,
+            config,
+        )?,
         ("POST", "/pair") => handle_pair(
             request,
             state,
@@ -789,7 +930,7 @@ fn trigger_shutdown() -> Result<()> {
     Ok(())
 }
 
-fn get_os_name() -> String {
+pub fn get_os_name() -> String {
     #[cfg(target_os = "linux")]
     {
         if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
@@ -840,7 +981,6 @@ mod tests {
             webhook_id: None,
             api_key: None,
             ha_url: None,
-            grub_boot_url: None,
         };
         std::fs::write(&state_path, serde_json::to_string_pretty(&state_data)?)?;
 
@@ -862,7 +1002,6 @@ mod tests {
             webhook_id: None,
             api_key: None,
             ha_url: None,
-            grub_boot_url: None,
         };
 
         let (mac, address) = crate::config::resolve_interface_details("lo").unwrap();
@@ -916,25 +1055,53 @@ mod tests {
         // Wait a tiny bit for server to spin up
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // Perform pair request to the daemon
+        // 1. Verify PIN and retrieve details
+        let res_verify = ureq::post(&format!("http://127.0.0.1:{}/pair/verify", daemon_port))
+            .set("Authorization", "Bearer test-setup-pin")
+            .send_json(serde_json::json!({}))?;
+        assert_eq!(res_verify.status(), StatusCode::OK.as_u16());
+        let verify_json: serde_json::Value = res_verify.into_json()?;
+        assert!(verify_json["success"].as_bool().unwrap());
+        let token = verify_json["token"].as_str().unwrap();
+        assert!(!token.is_empty());
+        assert!(verify_json["mac"].as_str().is_some());
+        assert_eq!(verify_json["hostname"].as_str().unwrap(), hostname::get()?.to_string_lossy().into_owned());
+        let options = verify_json["boot_options"].as_array().unwrap();
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].as_str().unwrap(), "Ubuntu");
+        assert_eq!(options[1].as_str().unwrap(), "Advanced>Kernel 2");
+
+        // 1b. Test /interfaces endpoint
+        let res_interfaces = ureq::get(&format!("http://127.0.0.1:{}/interfaces", daemon_port))
+            .set("Authorization", &format!("Bearer {}", token))
+            .call()?;
+        assert_eq!(res_interfaces.status(), StatusCode::OK.as_u16());
+        let interfaces_json: serde_json::Value = res_interfaces.into_json()?;
+        let interfaces_list = interfaces_json.as_array().unwrap();
+        assert!(!interfaces_list.is_empty());
+
+        // Test unauthorized access to /interfaces
+        let res_unauth = ureq::get(&format!("http://127.0.0.1:{}/interfaces", daemon_port))
+            .set("Authorization", "Bearer invalid-token")
+            .call();
+        assert!(res_unauth.is_err());
+
+        // 2. Perform pair request (config hand-off) to the daemon
         let pair_payload = serde_json::json!({
             "webhook_id": "test-webhook-id",
             "api_key": "test-api-key",
             "ha_url": format!("http://127.0.0.1:{}", ha_port),
-            "grub_boot_url": "http://127.0.0.1/grub",
             "update_grub": false,
+            "interface": "lo",
         });
 
         let res = ureq::post(&format!("http://127.0.0.1:{}/pair", daemon_port))
-            .set("Authorization", "Bearer test-setup-pin")
+            .set("Authorization", &format!("Bearer {}", token))
             .send_json(pair_payload)?;
 
         assert_eq!(res.status(), StatusCode::OK.as_u16());
         let res_json: serde_json::Value = res.into_json()?;
         assert!(res_json["success"].as_bool().unwrap());
-        let token = res_json["token"].as_str().unwrap();
-        assert!(!token.is_empty());
-        assert!(res_json["mac"].as_str().is_some());
 
         // Check if state.json is saved correctly
         let state_path = dir.path().join("state.json");
@@ -946,7 +1113,6 @@ mod tests {
         assert_eq!(state_json["webhook_id"].as_str().unwrap(), "test-webhook-id");
         assert_eq!(state_json["api_key"].as_str().unwrap(), "test-api-key");
         assert_eq!(state_json["ha_url"].as_str().unwrap(), format!("http://127.0.0.1:{}", ha_port));
-        assert_eq!(state_json["grub_boot_url"].as_str().unwrap(), "http://127.0.0.1/grub");
 
         // Wait for the mock HA thread to finish
         handle.join().unwrap();
@@ -988,7 +1154,6 @@ mod tests {
             webhook_id: None,
             api_key: None,
             ha_url: None,
-            grub_boot_url: None,
         };
 
         // Write mock state.json containing setup_pin and paired: false
@@ -1000,7 +1165,6 @@ mod tests {
             webhook_id: None,
             api_key: None,
             ha_url: None,
-            grub_boot_url: None,
         };
         std::fs::write(&state_path, serde_json::to_string_pretty(&state_data)?)?;
 
@@ -1040,13 +1204,13 @@ mod tests {
             "webhook_id": "test-webhook-id",
             "api_key": "test-api-key",
             "ha_url": format!("http://127.0.0.1:{}", ha_port),
-            "grub_boot_url": "http://127.0.0.1/grub",
             "update_grub": false,
+            "interface": "lo",
         });
 
-        // 1. Attempt to pair with no auth token (should fail with 401)
-        let res_no_auth = ureq::post(&format!("http://127.0.0.1:{}/pair", daemon_port))
-            .send_json(pair_payload.clone());
+        // 1. Attempt to verify PIN with no auth token (should fail with 401)
+        let res_no_auth = ureq::post(&format!("http://127.0.0.1:{}/pair/verify", daemon_port))
+            .send_json(serde_json::json!({}));
         assert!(res_no_auth.is_err());
         if let Err(ureq::Error::Status(code, _)) = res_no_auth {
             assert_eq!(code, StatusCode::UNAUTHORIZED.as_u16());
@@ -1054,10 +1218,10 @@ mod tests {
             panic!("Expected status error 401");
         }
 
-        // 2. Attempt to pair with invalid auth token (should fail with 401)
-        let res_bad_auth = ureq::post(&format!("http://127.0.0.1:{}/pair", daemon_port))
+        // 2. Attempt to verify PIN with invalid auth token (should fail with 401)
+        let res_bad_auth = ureq::post(&format!("http://127.0.0.1:{}/pair/verify", daemon_port))
             .set("Authorization", "Bearer 111111")
-            .send_json(pair_payload.clone());
+            .send_json(serde_json::json!({}));
         assert!(res_bad_auth.is_err());
         if let Err(ureq::Error::Status(code, _)) = res_bad_auth {
             assert_eq!(code, StatusCode::UNAUTHORIZED.as_u16());
@@ -1065,15 +1229,30 @@ mod tests {
             panic!("Expected status error 401");
         }
 
-        // 3. Attempt to pair with correct setup pin (should succeed)
-        let res = ureq::post(&format!("http://127.0.0.1:{}/pair", daemon_port))
+        // 3. Attempt to verify PIN with correct setup pin (should succeed)
+        let res_verify = ureq::post(&format!("http://127.0.0.1:{}/pair/verify", daemon_port))
             .set("Authorization", "Bearer 654321")
+            .send_json(serde_json::json!({}))?;
+
+        assert_eq!(res_verify.status(), StatusCode::OK.as_u16());
+        let verify_json: serde_json::Value = res_verify.into_json()?;
+        assert!(verify_json["success"].as_bool().unwrap());
+        let token = verify_json["token"].as_str().unwrap();
+
+        // 4. Attempt to configure pairing with invalid token (should fail with 401)
+        let res_bad_config = ureq::post(&format!("http://127.0.0.1:{}/pair", daemon_port))
+            .set("Authorization", "Bearer bad-token")
+            .send_json(pair_payload.clone());
+        assert!(res_bad_config.is_err());
+
+        // 5. Attempt to configure pairing with correct token (should succeed)
+        let res = ureq::post(&format!("http://127.0.0.1:{}/pair", daemon_port))
+            .set("Authorization", &format!("Bearer {}", token))
             .send_json(pair_payload)?;
 
         assert_eq!(res.status(), StatusCode::OK.as_u16());
         let res_json: serde_json::Value = res.into_json()?;
         assert!(res_json["success"].as_bool().unwrap());
-        assert!(res_json["mac"].as_str().is_some());
 
         // Wait for the mock HA thread to finish
         handle.join().unwrap();

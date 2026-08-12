@@ -28,8 +28,6 @@ pub struct Config {
     pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ha_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grub_boot_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
@@ -125,7 +123,6 @@ mod tests {
             webhook_id: None,
             api_key: None,
             ha_url: None,
-            grub_boot_url: None,
         }
     }
 
@@ -146,7 +143,6 @@ mod tests {
             webhook_id: None,
             api_key: None,
             ha_url: None,
-            grub_boot_url: None,
         };
         assert!(config.validate().is_ok());
 
@@ -155,7 +151,6 @@ mod tests {
         assert!(!yaml.contains("webhook_id"));
         assert!(!yaml.contains("api_key"));
         assert!(!yaml.contains("ha_url"));
-        assert!(!yaml.contains("grub_boot_url"));
         assert!(!yaml.contains("daemon"));
         assert!(!yaml.contains("grub"));
     }
